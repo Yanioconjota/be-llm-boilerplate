@@ -45,6 +45,7 @@ A complete FastAPI microservices backend with Redis caching, MongoDB persistence
 ```
 project-root/
 ├── docker-compose.yml
+├── test-websocket.html      # WebSocket test page (open in browser)
 ├── fast-api/
 │   ├── app/
 │   │   └── main.py
@@ -102,11 +103,34 @@ project-root/
 
 ### FastAPI (Port 8000)
 
+#### REST Endpoints
+
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/` | Health check |
 | GET | `/joker` | Demo: get a joke from Ollama |
-| POST | `/ask` | Send prompt, get LLM response |
+| POST | `/ask` | Send prompt, get LLM response (full response) |
+
+#### WebSocket Endpoint
+
+| Protocol | Path | Description |
+|----------|------|-------------|
+| WS | `/ws/ask` | Stream LLM responses token-by-token |
+
+**WebSocket Flow:**
+```
+Client                          Server
+   │                               │
+   │──── Connect to /ws/ask ──────▶│
+   │◀──────── Connected ───────────│
+   │                               │
+   │─ {"prompt": "Hello"} ────────▶│
+   │◀─ {"chunk": "Hi", ...} ───────│
+   │◀─ {"chunk": " there", ...} ───│
+   │◀─ {"chunk": "!", ...} ────────│
+   │◀─ {"done": true, ...} ────────│
+   │                               │
+```
 
 ### Storage Service (Port 8001)
 
@@ -133,6 +157,51 @@ curl -X POST http://localhost:8000/ask \
 curl -X POST http://localhost:8000/ask \
   -H "Content-Type: application/json" \
   -d '{"prompt": "Why is the sky blue?"}'
+```
+
+## Testing WebSocket
+
+### Option 1: HTML Test Page (Included)
+
+Open `test-websocket.html` in your browser:
+
+```bash
+# Windows
+start test-websocket.html
+
+# macOS
+open test-websocket.html
+
+# Linux
+xdg-open test-websocket.html
+```
+
+The test page features:
+- Connect/Disconnect controls
+- Real-time streaming display
+- Chunk counter and response time
+- Cache status indicator
+- Connection log
+
+### Option 2: Browser DevTools Console
+
+1. Open http://localhost:8000/docs
+2. Press F12 → Console tab
+3. Run:
+
+```javascript
+const ws = new WebSocket('ws://localhost:8000/ws/ask');
+ws.onopen = () => console.log('Connected!');
+ws.onmessage = (e) => console.log(JSON.parse(e.data));
+ws.send(JSON.stringify({ prompt: "Tell me a joke" }));
+```
+
+### Option 3: wscat (CLI)
+
+```bash
+npm install -g wscat
+wscat -c ws://localhost:8000/ws/ask
+# Then type: {"prompt": "Hello"}
 ```
 
 ## Response Format
@@ -223,9 +292,31 @@ export interface HealthCheckResponse {
 export interface JokeResponse {
   result: string;
 }
+
+// WebSocket message types
+export interface WsPromptRequest {
+  prompt: string;
+}
+
+export interface WsChunkMessage {
+  chunk: string;
+  done: boolean;
+  cached: boolean;
+}
+
+export interface WsErrorMessage {
+  error: 'validation' | 'llm_unavailable' | 'timeout' | 'internal';
+  message: string;
+}
+
+export type WsMessage = WsChunkMessage | WsErrorMessage;
+
+export function isWsError(msg: WsMessage): msg is WsErrorMessage {
+  return 'error' in msg;
+}
 ```
 
-### API Reference
+### REST API Reference
 
 | Endpoint | Method | Request Body | Response Type |
 |----------|--------|--------------|---------------|
@@ -233,9 +324,20 @@ export interface JokeResponse {
 | `/ask` | POST | `{ prompt: string }` | `{ response: string, cached: boolean }` |
 | `/joker` | GET | - | `{ result: string }` |
 
+### WebSocket API Reference
+
+| Endpoint | Send | Receive |
+|----------|------|---------|
+| `ws://localhost:8000/ws/ask` | `{ prompt: string }` | `{ chunk, done, cached }` or `{ error, message }` |
+
+**Response Messages:**
+- **Chunk**: `{ "chunk": "token", "done": false, "cached": false }`
+- **Complete**: `{ "chunk": "", "done": true, "cached": false }`
+- **Error**: `{ "error": "llm_unavailable", "message": "..." }`
+
 ---
 
-## Angular Integration
+## Angular Integration (REST)
 
 ### App Configuration
 
@@ -364,7 +466,206 @@ export class ChatComponent {
 
 ---
 
-## React + TypeScript Integration
+## Angular Integration (WebSocket)
+
+### WebSocket Service
+
+```typescript
+// services/llm-websocket.service.ts
+import { Injectable, inject, signal, computed } from '@angular/core';
+import { webSocket, WebSocketSubject } from 'rxjs/webSocket';
+import { Subject, timer } from 'rxjs';
+import { retry, takeUntil } from 'rxjs/operators';
+import { WsMessage, WsChunkMessage, isWsError } from '../models/llm.models';
+
+@Injectable({ providedIn: 'root' })
+export class LlmWebSocketService {
+  private socket$: WebSocketSubject<any> | null = null;
+  private readonly wsUrl = 'ws://localhost:8000/ws/ask';
+  private destroy$ = new Subject<void>();
+  private reconnectAttempts = 0;
+
+  readonly chunks = signal<string[]>([]);
+  readonly loading = signal(false);
+  readonly error = signal<string | null>(null);
+  readonly connected = signal(false);
+  readonly cached = signal(false);
+
+  readonly fullResponse = computed(() => this.chunks().join(''));
+
+  connect(): void {
+    if (this.socket$) return;
+
+    this.socket$ = webSocket({
+      url: this.wsUrl,
+      openObserver: {
+        next: () => {
+          this.connected.set(true);
+          this.reconnectAttempts = 0;
+          console.log('WebSocket connected');
+        }
+      },
+      closeObserver: {
+        next: () => {
+          this.connected.set(false);
+          console.log('WebSocket disconnected');
+          this.scheduleReconnect();
+        }
+      }
+    });
+
+    this.socket$.pipe(takeUntil(this.destroy$)).subscribe({
+      next: (msg: WsMessage) => this.handleMessage(msg),
+      error: (err) => {
+        console.error('WebSocket error:', err);
+        this.error.set('Connection error');
+        this.loading.set(false);
+      }
+    });
+  }
+
+  private scheduleReconnect(): void {
+    if (this.reconnectAttempts >= 5) {
+      this.error.set('Connection failed after multiple attempts');
+      return;
+    }
+
+    const delay = this.getReconnectDelay(this.reconnectAttempts);
+    this.reconnectAttempts++;
+    
+    timer(delay).pipe(takeUntil(this.destroy$)).subscribe(() => {
+      this.socket$ = null;
+      this.connect();
+    });
+  }
+
+  private getReconnectDelay(attempt: number): number {
+    if (attempt <= 1) return 1000;
+    return Math.min(1000 * Math.pow(2, attempt - 1), 30000);
+  }
+
+  private handleMessage(msg: WsMessage): void {
+    if (isWsError(msg)) {
+      this.error.set(msg.message);
+      this.loading.set(false);
+      return;
+    }
+
+    const chunk = msg as WsChunkMessage;
+    
+    if (chunk.chunk) {
+      this.chunks.update(c => [...c, chunk.chunk]);
+    }
+
+    if (chunk.done) {
+      this.loading.set(false);
+      this.cached.set(chunk.cached);
+    }
+  }
+
+  askPrompt(prompt: string): void {
+    if (!this.socket$ || !this.connected()) {
+      this.error.set('Not connected');
+      return;
+    }
+
+    this.chunks.set([]);
+    this.error.set(null);
+    this.loading.set(true);
+    this.cached.set(false);
+
+    this.socket$.next({ prompt });
+  }
+
+  disconnect(): void {
+    this.destroy$.next();
+    this.socket$?.complete();
+    this.socket$ = null;
+  }
+}
+```
+
+### WebSocket Chat Component
+
+```typescript
+// components/chat-ws.component.ts
+import { Component, inject, OnInit, OnDestroy } from '@angular/core';
+import { FormsModule } from '@angular/forms';
+import { LlmWebSocketService } from '../services/llm-websocket.service';
+
+@Component({
+  selector: 'app-chat-ws',
+  standalone: true,
+  imports: [FormsModule],
+  template: `
+    <div class="chat-container">
+      <h2>Ollama Chat (WebSocket)</h2>
+      
+      <div class="status">
+        @if (ws.connected()) {
+          <span class="connected">● Connected</span>
+        } @else {
+          <span class="disconnected">○ Disconnected</span>
+        }
+      </div>
+      
+      <textarea 
+        [(ngModel)]="prompt" 
+        placeholder="Enter your prompt..."
+        rows="4"
+      ></textarea>
+      
+      <button (click)="sendPrompt()" [disabled]="ws.loading() || !ws.connected()">
+        @if (ws.loading()) {
+          Streaming...
+        } @else {
+          Send
+        }
+      </button>
+
+      @if (ws.error(); as error) {
+        <div class="error">{{ error }}</div>
+      }
+
+      @if (ws.fullResponse(); as response) {
+        <div class="response">
+          <p>{{ response }}</p>
+          @if (!ws.loading()) {
+            <small class="cache-indicator">
+              @if (ws.cached()) {
+                ⚡ From cache
+              } @else {
+                🔄 Fresh response
+              }
+            </small>
+          }
+        </div>
+      }
+    </div>
+  `
+})
+export class ChatWsComponent implements OnInit, OnDestroy {
+  protected readonly ws = inject(LlmWebSocketService);
+  protected prompt = '';
+
+  ngOnInit(): void {
+    this.ws.connect();
+  }
+
+  ngOnDestroy(): void {
+    this.ws.disconnect();
+  }
+
+  sendPrompt(): void {
+    if (!this.prompt.trim()) return;
+    this.ws.askPrompt(this.prompt);
+  }
+}
+```
+
+---
+
+## React + TypeScript Integration (REST)
 
 ### API Client
 
@@ -523,6 +824,212 @@ export function useAskPrompt() {
 
 // Usage in component:
 // const { mutate: askPrompt, data: response, isPending, error } = useAskPrompt();
+```
+
+---
+
+## React + TypeScript Integration (WebSocket)
+
+### WebSocket Hook
+
+```typescript
+// hooks/useLlmWebSocket.ts
+import { useState, useCallback, useRef, useEffect } from 'react';
+import { WsMessage, WsChunkMessage, isWsError } from '../models/llm.models';
+
+interface UseLlmWebSocketReturn {
+  chunks: string[];
+  fullResponse: string;
+  loading: boolean;
+  error: string | null;
+  connected: boolean;
+  cached: boolean;
+  connect: () => void;
+  disconnect: () => void;
+  askPrompt: (prompt: string) => void;
+}
+
+export function useLlmWebSocket(): UseLlmWebSocketReturn {
+  const [chunks, setChunks] = useState<string[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [connected, setConnected] = useState(false);
+  const [cached, setCached] = useState(false);
+  
+  const wsRef = useRef<WebSocket | null>(null);
+  const reconnectAttempts = useRef(0);
+  const reconnectTimeout = useRef<NodeJS.Timeout>();
+
+  const getReconnectDelay = (attempt: number): number => {
+    if (attempt <= 1) return 1000;
+    return Math.min(1000 * Math.pow(2, attempt - 1), 30000);
+  };
+
+  const connect = useCallback(() => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) return;
+
+    const ws = new WebSocket('ws://localhost:8000/ws/ask');
+
+    ws.onopen = () => {
+      setConnected(true);
+      setError(null);
+      reconnectAttempts.current = 0;
+      console.log('WebSocket connected');
+    };
+
+    ws.onclose = () => {
+      setConnected(false);
+      console.log('WebSocket disconnected');
+      
+      if (reconnectAttempts.current < 5) {
+        const delay = getReconnectDelay(reconnectAttempts.current);
+        reconnectAttempts.current++;
+        reconnectTimeout.current = setTimeout(connect, delay);
+      } else {
+        setError('Connection failed after multiple attempts');
+      }
+    };
+
+    ws.onerror = () => {
+      setError('WebSocket error');
+      setLoading(false);
+    };
+
+    ws.onmessage = (event) => {
+      const msg: WsMessage = JSON.parse(event.data);
+
+      if (isWsError(msg)) {
+        setError(msg.message);
+        setLoading(false);
+        return;
+      }
+
+      const chunk = msg as WsChunkMessage;
+
+      if (chunk.chunk) {
+        setChunks(prev => [...prev, chunk.chunk]);
+      }
+
+      if (chunk.done) {
+        setLoading(false);
+        setCached(chunk.cached);
+      }
+    };
+
+    wsRef.current = ws;
+  }, []);
+
+  const disconnect = useCallback(() => {
+    if (reconnectTimeout.current) {
+      clearTimeout(reconnectTimeout.current);
+    }
+    wsRef.current?.close();
+    wsRef.current = null;
+  }, []);
+
+  const askPrompt = useCallback((prompt: string) => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+      setError('Not connected');
+      return;
+    }
+
+    setChunks([]);
+    setError(null);
+    setLoading(true);
+    setCached(false);
+
+    wsRef.current.send(JSON.stringify({ prompt }));
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      disconnect();
+    };
+  }, [disconnect]);
+
+  return {
+    chunks,
+    fullResponse: chunks.join(''),
+    loading,
+    error,
+    connected,
+    cached,
+    connect,
+    disconnect,
+    askPrompt,
+  };
+}
+```
+
+### WebSocket Chat Component
+
+```tsx
+// components/ChatWebSocket.tsx
+import { useEffect, useState, FormEvent } from 'react';
+import { useLlmWebSocket } from '../hooks/useLlmWebSocket';
+
+export function ChatWebSocket() {
+  const [prompt, setPrompt] = useState('');
+  const { 
+    fullResponse, 
+    loading, 
+    error, 
+    connected, 
+    cached,
+    connect, 
+    askPrompt 
+  } = useLlmWebSocket();
+
+  useEffect(() => {
+    connect();
+  }, [connect]);
+
+  const handleSubmit = (e: FormEvent) => {
+    e.preventDefault();
+    if (!prompt.trim() || !connected) return;
+    askPrompt(prompt);
+  };
+
+  return (
+    <div className="chat-container">
+      <h2>Ollama Chat (WebSocket)</h2>
+
+      <div className="status">
+        {connected ? (
+          <span className="connected">● Connected</span>
+        ) : (
+          <span className="disconnected">○ Disconnected</span>
+        )}
+      </div>
+
+      <form onSubmit={handleSubmit}>
+        <textarea
+          value={prompt}
+          onChange={(e) => setPrompt(e.target.value)}
+          placeholder="Enter your prompt..."
+          rows={4}
+        />
+
+        <button type="submit" disabled={loading || !connected}>
+          {loading ? 'Streaming...' : 'Send'}
+        </button>
+      </form>
+
+      {error && <div className="error">{error}</div>}
+
+      {fullResponse && (
+        <div className="response">
+          <p>{fullResponse}</p>
+          {!loading && (
+            <small className="cache-indicator">
+              {cached ? '⚡ From cache' : '🔄 Fresh response'}
+            </small>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
 ```
 
 ---
