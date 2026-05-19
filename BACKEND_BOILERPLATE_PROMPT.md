@@ -58,7 +58,7 @@ project-root/
 │   │   ├── __init__.py
 │   │   ├── cache.py
 │   │   └── forward.py
-│   ├── .env
+│   ├── .env.template
 │   ├── Dockerfile
 │   └── requirements.txt
 └── chat-storage-service/
@@ -70,7 +70,7 @@ project-root/
     │   └── routes/
     │       ├── __init__.py
     │       └── save.py
-    ├── .env
+    ├── .env.template
     ├── Dockerfile
     └── requirements.txt
 ```
@@ -180,7 +180,7 @@ uvicorn[standard]
 redis
 ```
 
-### `fast-api/.env`
+### `fast-api/.env.template`
 
 ```
 APP_NAME=FastAPI App
@@ -423,7 +423,7 @@ pymongo
 python-dotenv
 ```
 
-### `chat-storage-service/.env`
+### `chat-storage-service/.env.template`
 
 ```
 MONGO_URI=mongodb://mongo:27017
@@ -523,6 +523,10 @@ def check_db_connection():
 ## Run the Project
 
 ```bash
+# Copy environment templates
+cp fast-api/.env.template fast-api/.env
+cp chat-storage-service/.env.template chat-storage-service/.env
+
 # Start all services
 docker-compose up --build
 
