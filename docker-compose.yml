@@ -1,0 +1,61 @@
+services:
+  fastapi:
+    build:
+      context: ./fast-api
+    container_name: ollama-api
+    ports:
+      - "8000:8000"
+    env_file:
+      - ./fast-api/.env
+    volumes:
+      - ./fast-api:/app
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - storage-service
+      - redis
+
+  storage-service:
+    build:
+      context: ./chat-storage-service
+    container_name: storage-api
+    ports:
+      - "8001:8001"
+    env_file:
+      - ./chat-storage-service/.env
+    volumes:
+      - ./chat-storage-service:/app
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - mongo
+
+  mongo:
+    image: mongo:6
+    container_name: mongodb
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+    environment:
+      MONGO_INITDB_DATABASE: ollama
+
+  redis:
+    image: redis:6-alpine
+    container_name: redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+
+  redis-ui:
+    image: redis/redisinsight
+    container_name: redis-ui
+    ports:
+      - "8002:5540"
+    depends_on:
+      - redis
+
+volumes:
+  mongo-data:
+  redis-data:

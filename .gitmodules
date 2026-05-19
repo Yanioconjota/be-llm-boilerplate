@@ -1,0 +1,9 @@
+[submodule "fast-api"]
+	path = fast-api
+	url = https://github.com/Yanioconjota/fast-api
+[submodule "chat-storage-service"]
+	path = chat-storage-service
+	url = https://github.com/Yanioconjota/chat-storage-service
+[submodule "ollama-chat"]
+	path = ollama-chat
+	url = https://github.com/Yanioconjota/ollama-chat

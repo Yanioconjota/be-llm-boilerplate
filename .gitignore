@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.env
+node_modules/
+chat-storage-service/.env
+fast-api/.env
+ollama-chat/.env
+ollama-chat/node_modules
