@@ -336,6 +336,22 @@
             font-size: 12px;
             color: #666;
         }
+        
+        .btn-delete {
+            background: transparent;
+            border: none;
+            color: #666;
+            cursor: pointer;
+            padding: 4px 8px;
+            font-size: 14px;
+            border-radius: 4px;
+            transition: all 0.2s;
+        }
+        
+        .btn-delete:hover {
+            background: rgba(244, 67, 54, 0.2);
+            color: #f44336;
+        }
     </style>
 </head>
 <body>
@@ -449,6 +465,7 @@
                             <div class="conversation-item-title">${conv.title || 'Untitled'}</div>
                             <div class="conversation-item-meta">${conv.message_count} messages • ${new Date(conv.updated_at).toLocaleString()}</div>
                         </div>
+                        <button class="btn-delete" onclick="event.stopPropagation(); deleteConversation('${conv.id}')" title="Delete conversation">✕</button>
                     </div>
                 `).join('');
                 
@@ -475,6 +492,40 @@
                 selectConversation(conv.id);
             } catch (error) {
                 log(`Failed to create conversation: ${error.message}`, 'error');
+            }
+        }
+        
+        // Delete conversation
+        async function deleteConversation(id) {
+            if (!confirm('Delete this conversation?')) return;
+            
+            try {
+                log(`Deleting conversation ${id}...`);
+                const response = await fetch(`${API_BASE}/conversations/${id}`, {
+                    method: 'DELETE'
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}`);
+                }
+                
+                log('Conversation deleted', 'success');
+                
+                // Clear chat if this was the active conversation
+                if (currentConversationId === id) {
+                    currentConversationId = null;
+                    document.getElementById('messages').innerHTML = '<div class="empty-state">Select or create a conversation to start chatting</div>';
+                    document.getElementById('conversationInfo').style.display = 'none';
+                    document.getElementById('reloadBtn').style.display = 'none';
+                    document.getElementById('prompt').disabled = true;
+                    document.getElementById('sendBtn').disabled = true;
+                    document.getElementById('messageCount').textContent = '0';
+                    setStatus('○ No conversation selected', 'no-conversation');
+                }
+                
+                await loadConversations();
+            } catch (error) {
+                log(`Failed to delete conversation: ${error.message}`, 'error');
             }
         }
         
