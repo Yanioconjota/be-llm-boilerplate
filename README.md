@@ -1,6 +1,6 @@
 # Microservices Backend with Ollama LLM
 
-A complete FastAPI microservices backend with Redis caching, MongoDB persistence, and Ollama LLM integration.
+A complete FastAPI microservices backend with Redis caching, MongoDB persistence, Ollama LLM integration, and **Server-Sent Events (SSE)** for streaming responses.
 
 ## Architecture
 
@@ -24,11 +24,13 @@ A complete FastAPI microservices backend with Redis caching, MongoDB persistence
 └──────────────────┘     └───────────────────┘
 ```
 
-**Flow**:
-1. Client sends prompt to FastAPI `/ask`
-2. FastAPI checks Redis cache (HIT → return immediately)
-3. On MISS → call Ollama LLM → cache response → persist to MongoDB
-4. Return response with `{ cached: true/false }` flag
+**Flow (Conversations)**:
+1. Client creates a conversation via `POST /conversations`
+2. Client sends prompt to `POST /conversations/{id}/stream`
+3. User message is stored
+4. FastAPI checks Redis cache (HIT → stream cached response)
+5. On MISS → stream from Ollama with conversation context → cache response → store assistant message
+6. Response streams via Server-Sent Events (SSE)
 
 ## Prerequisites
 
@@ -45,7 +47,8 @@ A complete FastAPI microservices backend with Redis caching, MongoDB persistence
 ```
 project-root/
 ├── docker-compose.yml
-├── test-websocket.html      # WebSocket test page (open in browser)
+├── specs/
+│   └── sse-conversations.spec.md   # Feature specification
 ├── fast-api/
 │   ├── app/
 │   │   └── main.py
@@ -64,7 +67,9 @@ project-root/
     │   ├── models.py
     │   └── routes/
     │       ├── __init__.py
-    │       └── save.py
+    │       ├── save.py
+    │       ├── conversations.py
+    │       └── messages.py
     ├── .env.template
     ├── Dockerfile
     └── requirements.txt
@@ -103,118 +108,709 @@ project-root/
 
 ### FastAPI (Port 8000)
 
-#### REST Endpoints
+#### Health & Legacy Endpoints
 
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/` | Health check |
 | GET | `/joker` | Demo: get a joke from Ollama |
-| POST | `/ask` | Send prompt, get LLM response (full response) |
+| POST | `/ask` | Stateless prompt (no conversation context) |
 
-#### WebSocket Endpoint
+#### Conversation Endpoints
 
-| Protocol | Path | Description |
-|----------|------|-------------|
-| WS | `/ws/ask` | Stream LLM responses token-by-token |
-
-**WebSocket Flow:**
-```
-Client                          Server
-   │                               │
-   │──── Connect to /ws/ask ──────▶│
-   │◀──────── Connected ───────────│
-   │                               │
-   │─ {"prompt": "Hello"} ────────▶│
-   │◀─ {"chunk": "Hi", ...} ───────│
-   │◀─ {"chunk": " there", ...} ───│
-   │◀─ {"chunk": "!", ...} ────────│
-   │◀─ {"done": true, ...} ────────│
-   │                               │
-```
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/conversations` | Create a new conversation |
+| GET | `/conversations` | List all conversations (paginated) |
+| GET | `/conversations/{id}` | Get conversation with all messages |
+| DELETE | `/conversations/{id}` | Delete conversation and messages |
+| POST | `/conversations/{id}/stream` | Send message & stream response (SSE) |
 
 ### Storage Service (Port 8001)
 
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | `/save` | Save prompt/response pair |
+| POST | `/save` | Legacy: Save prompt/response pair |
 | GET | `/health` | Check MongoDB connection |
+| POST | `/conversations` | Create conversation |
+| GET | `/conversations` | List conversations |
+| GET | `/conversations/{id}` | Get conversation with messages |
+| DELETE | `/conversations/{id}` | Delete conversation |
+| POST | `/messages` | Create message |
+| GET | `/conversations/{id}/messages` | Get messages |
 
 ## Usage Examples
 
+### Create a Conversation
+
 ```bash
-# Test FastAPI health
-curl http://localhost:8000/
-
-# Test Storage health
-curl http://localhost:8001/health
-
-# Send a prompt (first call = cache miss)
-curl -X POST http://localhost:8000/ask \
+curl -X POST http://localhost:8000/conversations \
   -H "Content-Type: application/json" \
-  -d '{"prompt": "Why is the sky blue?"}'
-
-# Same prompt again (cache hit, much faster)
-curl -X POST http://localhost:8000/ask \
-  -H "Content-Type: application/json" \
-  -d '{"prompt": "Why is the sky blue?"}'
+  -d '{"title": "My Chat", "model": "llama3"}'
 ```
 
-## Testing WebSocket
-
-### Option 1: HTML Test Page (Included)
-
-Open `test-websocket.html` in your browser:
-
-```bash
-# Windows
-start test-websocket.html
-
-# macOS
-open test-websocket.html
-
-# Linux
-xdg-open test-websocket.html
-```
-
-The test page features:
-- Connect/Disconnect controls
-- Real-time streaming display
-- Chunk counter and response time
-- Cache status indicator
-- Connection log
-
-### Option 2: Browser DevTools Console
-
-1. Open http://localhost:8000/docs
-2. Press F12 → Console tab
-3. Run:
-
-```javascript
-const ws = new WebSocket('ws://localhost:8000/ws/ask');
-ws.onopen = () => console.log('Connected!');
-ws.onmessage = (e) => console.log(JSON.parse(e.data));
-ws.send(JSON.stringify({ prompt: "Tell me a joke" }));
-```
-
-### Option 3: wscat (CLI)
-
-```bash
-npm install -g wscat
-wscat -c ws://localhost:8000/ws/ask
-# Then type: {"prompt": "Hello"}
-```
-
-## Response Format
-
+Response:
 ```json
 {
-  "response": "The sky appears blue because...",
-  "cached": false
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "title": "My Chat",
+  "created_at": "2024-01-15T10:30:00",
+  "updated_at": "2024-01-15T10:30:00",
+  "model": "llama3",
+  "message_count": 0
 }
 ```
 
-- `cached: true` → Response from Redis (fast)
-- `cached: false` → Fresh from Ollama (slower, now cached)
+### List Conversations
+
+```bash
+curl "http://localhost:8000/conversations?limit=10&offset=0"
+```
+
+### Get Conversation with Messages
+
+```bash
+curl http://localhost:8000/conversations/{conversation_id}
+```
+
+### Stream a Message (SSE)
+
+```bash
+curl -N -X POST "http://localhost:8000/conversations/{id}/stream" \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "Hello, how are you?"}'
+```
+
+Response (Server-Sent Events):
+```
+event: message
+data: {"chunk": "Hello", "done": false, "cached": false}
+
+event: message
+data: {"chunk": "!", "done": false, "cached": false}
+
+event: message
+data: {"chunk": " I", "done": false, "cached": false}
+
+...
+
+event: message
+data: {"chunk": "", "done": true, "cached": false}
+```
+
+### Delete a Conversation
+
+```bash
+curl -X DELETE http://localhost:8000/conversations/{id}
+```
+
+## SSE Event Format
+
+### Success Events
+
+```
+event: message
+data: {"chunk": "token text", "done": false, "cached": false}
+
+event: message
+data: {"chunk": "", "done": true, "cached": false}
+```
+
+### Error Events
+
+```
+event: error
+data: {"error": "llm_unavailable", "message": "Cannot connect to Ollama"}
+
+event: error
+data: {"error": "timeout", "message": "Request timed out"}
+
+event: error
+data: {"error": "internal", "message": "An error occurred"}
+```
+
+---
+
+## Frontend Integration
+
+### TypeScript Interfaces
+
+```typescript
+// models/conversation.models.ts
+
+export interface Conversation {
+  id: string;
+  title: string | null;
+  created_at: string;
+  updated_at: string;
+  model: string;
+  message_count: number;
+}
+
+export interface Message {
+  id: string;
+  conversation_id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  timestamp: string;
+  cached?: boolean;
+}
+
+export interface ConversationWithMessages extends Conversation {
+  messages: Message[];
+}
+
+export interface ConversationList {
+  items: Conversation[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface CreateConversationRequest {
+  title?: string;
+  model?: string;
+}
+
+export interface StreamRequest {
+  prompt: string;
+}
+
+// SSE Event types
+export interface SseChunkEvent {
+  chunk: string;
+  done: boolean;
+  cached: boolean;
+}
+
+export interface SseErrorEvent {
+  error: 'validation' | 'llm_unavailable' | 'timeout' | 'internal';
+  message: string;
+}
+
+export type SseEvent = SseChunkEvent | SseErrorEvent;
+
+export function isSseError(event: SseEvent): event is SseErrorEvent {
+  return 'error' in event;
+}
+```
+
+---
+
+## Angular Integration
+
+### Conversation Service
+
+```typescript
+// services/conversation.service.ts
+import { Injectable, inject, signal } from '@angular/core';
+import { HttpClient } from '@angular/common/http';
+import { Observable } from 'rxjs';
+import {
+  Conversation,
+  ConversationWithMessages,
+  ConversationList,
+  CreateConversationRequest
+} from '../models/conversation.models';
+
+@Injectable({ providedIn: 'root' })
+export class ConversationService {
+  private readonly http = inject(HttpClient);
+  private readonly baseUrl = 'http://localhost:8000';
+
+  create(request: CreateConversationRequest = {}): Observable<Conversation> {
+    return this.http.post<Conversation>(`${this.baseUrl}/conversations`, request);
+  }
+
+  list(limit = 20, offset = 0): Observable<ConversationList> {
+    return this.http.get<ConversationList>(
+      `${this.baseUrl}/conversations`,
+      { params: { limit, offset } }
+    );
+  }
+
+  get(id: string): Observable<ConversationWithMessages> {
+    return this.http.get<ConversationWithMessages>(
+      `${this.baseUrl}/conversations/${id}`
+    );
+  }
+
+  delete(id: string): Observable<{ success: boolean }> {
+    return this.http.delete<{ success: boolean }>(
+      `${this.baseUrl}/conversations/${id}`
+    );
+  }
+}
+```
+
+### SSE Streaming Service
+
+```typescript
+// services/sse-chat.service.ts
+import { Injectable, inject, signal, computed } from '@angular/core';
+import { SseEvent, SseChunkEvent, isSseError } from '../models/conversation.models';
+import { ConversationService } from './conversation.service';
+
+@Injectable({ providedIn: 'root' })
+export class SseChatService {
+  private readonly conversationService = inject(ConversationService);
+  private readonly baseUrl = 'http://localhost:8000';
+  
+  private abortController: AbortController | null = null;
+
+  readonly chunks = signal<string[]>([]);
+  readonly isStreaming = signal(false);
+  readonly error = signal<string | null>(null);
+  readonly cached = signal(false);
+
+  readonly fullResponse = computed(() => this.chunks().join(''));
+
+  async streamMessage(conversationId: string, prompt: string): Promise<void> {
+    // Reset state
+    this.chunks.set([]);
+    this.error.set(null);
+    this.isStreaming.set(true);
+    this.cached.set(false);
+
+    // Create abort controller for cancellation
+    this.abortController = new AbortController();
+
+    try {
+      const response = await fetch(
+        `${this.baseUrl}/conversations/${conversationId}/stream`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ prompt }),
+          signal: this.abortController.signal
+        }
+      );
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
+
+      const reader = response.body?.getReader();
+      if (!reader) throw new Error('No response body');
+
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            const jsonStr = line.slice(6);
+            if (jsonStr.trim()) {
+              const event: SseEvent = JSON.parse(jsonStr);
+              
+              if (isSseError(event)) {
+                this.error.set(event.message);
+                this.isStreaming.set(false);
+                return;
+              }
+
+              const chunk = event as SseChunkEvent;
+              if (chunk.chunk) {
+                this.chunks.update(c => [...c, chunk.chunk]);
+              }
+              if (chunk.done) {
+                this.cached.set(chunk.cached);
+                this.isStreaming.set(false);
+                return;
+              }
+            }
+          }
+        }
+      }
+    } catch (err) {
+      if ((err as Error).name !== 'AbortError') {
+        this.error.set((err as Error).message);
+      }
+    } finally {
+      this.isStreaming.set(false);
+      this.abortController = null;
+    }
+  }
+
+  cancelStream(): void {
+    this.abortController?.abort();
+    this.isStreaming.set(false);
+  }
+
+  clearResponse(): void {
+    this.chunks.set([]);
+    this.error.set(null);
+    this.cached.set(false);
+  }
+}
+```
+
+### Chat Component Example
+
+```typescript
+// components/chat.component.ts
+import { Component, inject, signal, OnInit, OnDestroy } from '@angular/core';
+import { FormsModule } from '@angular/forms';
+import { ConversationService } from '../services/conversation.service';
+import { SseChatService } from '../services/sse-chat.service';
+import { ConversationWithMessages, Message } from '../models/conversation.models';
+
+@Component({
+  selector: 'app-chat',
+  standalone: true,
+  imports: [FormsModule],
+  template: `
+    <div class="chat-container">
+      <h2>Chat</h2>
+
+      @if (!conversationId()) {
+        <button (click)="startConversation()">Start New Conversation</button>
+      } @else {
+        <div class="messages">
+          @for (message of messages(); track message.id) {
+            <div [class]="'message message--' + message.role">
+              <strong>{{ message.role }}:</strong>
+              <p>{{ message.content }}</p>
+            </div>
+          }
+
+          @if (sseChat.isStreaming() || sseChat.fullResponse()) {
+            <div class="message message--assistant">
+              <strong>assistant:</strong>
+              <p>{{ sseChat.fullResponse() }}</p>
+              @if (sseChat.isStreaming()) {
+                <span class="typing-indicator">▌</span>
+              }
+            </div>
+          }
+        </div>
+
+        @if (sseChat.error(); as error) {
+          <div class="error" role="alert">{{ error }}</div>
+        }
+
+        <form (submit)="sendMessage($event)">
+          <textarea
+            [(ngModel)]="prompt"
+            name="prompt"
+            placeholder="Type your message..."
+            rows="3"
+            [disabled]="sseChat.isStreaming()"
+          ></textarea>
+          <button type="submit" [disabled]="sseChat.isStreaming() || !prompt.trim()">
+            @if (sseChat.isStreaming()) {
+              Streaming...
+            } @else {
+              Send
+            }
+          </button>
+          @if (sseChat.isStreaming()) {
+            <button type="button" (click)="sseChat.cancelStream()">Cancel</button>
+          }
+        </form>
+      }
+    </div>
+  `
+})
+export class ChatComponent {
+  protected readonly conversationService = inject(ConversationService);
+  protected readonly sseChat = inject(SseChatService);
+
+  protected conversationId = signal<string | null>(null);
+  protected messages = signal<Message[]>([]);
+  protected prompt = '';
+
+  async startConversation(): Promise<void> {
+    this.conversationService.create({ title: 'New Chat' }).subscribe({
+      next: (conv) => this.conversationId.set(conv.id),
+      error: (err) => console.error('Failed to create conversation:', err)
+    });
+  }
+
+  async sendMessage(event: Event): Promise<void> {
+    event.preventDefault();
+    
+    const prompt = this.prompt.trim();
+    if (!prompt || !this.conversationId()) return;
+
+    // Add user message to UI immediately
+    const userMessage: Message = {
+      id: crypto.randomUUID(),
+      conversation_id: this.conversationId()!,
+      role: 'user',
+      content: prompt,
+      timestamp: new Date().toISOString()
+    };
+    this.messages.update(m => [...m, userMessage]);
+    this.prompt = '';
+
+    // Stream response
+    await this.sseChat.streamMessage(this.conversationId()!, prompt);
+
+    // Add assistant message when done
+    if (this.sseChat.fullResponse() && !this.sseChat.error()) {
+      const assistantMessage: Message = {
+        id: crypto.randomUUID(),
+        conversation_id: this.conversationId()!,
+        role: 'assistant',
+        content: this.sseChat.fullResponse(),
+        timestamp: new Date().toISOString(),
+        cached: this.sseChat.cached()
+      };
+      this.messages.update(m => [...m, assistantMessage]);
+      this.sseChat.clearResponse();
+    }
+  }
+}
+```
+
+---
+
+## React + TypeScript Integration
+
+### SSE Hook
+
+```typescript
+// hooks/useSseChat.ts
+import { useState, useCallback, useRef } from 'react';
+import { SseEvent, SseChunkEvent, isSseError } from '../models/conversation.models';
+
+interface UseSseChatReturn {
+  chunks: string[];
+  fullResponse: string;
+  isStreaming: boolean;
+  error: string | null;
+  cached: boolean;
+  streamMessage: (conversationId: string, prompt: string) => Promise<void>;
+  cancelStream: () => void;
+  clearResponse: () => void;
+}
+
+export function useSseChat(): UseSseChatReturn {
+  const [chunks, setChunks] = useState<string[]>([]);
+  const [isStreaming, setIsStreaming] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [cached, setCached] = useState(false);
+  
+  const abortControllerRef = useRef<AbortController | null>(null);
+
+  const streamMessage = useCallback(async (conversationId: string, prompt: string) => {
+    setChunks([]);
+    setError(null);
+    setIsStreaming(true);
+    setCached(false);
+
+    abortControllerRef.current = new AbortController();
+
+    try {
+      const response = await fetch(
+        `http://localhost:8000/conversations/${conversationId}/stream`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ prompt }),
+          signal: abortControllerRef.current.signal
+        }
+      );
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+
+      const reader = response.body?.getReader();
+      if (!reader) throw new Error('No response body');
+
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            const jsonStr = line.slice(6);
+            if (jsonStr.trim()) {
+              const event: SseEvent = JSON.parse(jsonStr);
+              
+              if (isSseError(event)) {
+                setError(event.message);
+                setIsStreaming(false);
+                return;
+              }
+
+              const chunk = event as SseChunkEvent;
+              if (chunk.chunk) {
+                setChunks(prev => [...prev, chunk.chunk]);
+              }
+              if (chunk.done) {
+                setCached(chunk.cached);
+                setIsStreaming(false);
+                return;
+              }
+            }
+          }
+        }
+      }
+    } catch (err) {
+      if ((err as Error).name !== 'AbortError') {
+        setError((err as Error).message);
+      }
+    } finally {
+      setIsStreaming(false);
+      abortControllerRef.current = null;
+    }
+  }, []);
+
+  const cancelStream = useCallback(() => {
+    abortControllerRef.current?.abort();
+    setIsStreaming(false);
+  }, []);
+
+  const clearResponse = useCallback(() => {
+    setChunks([]);
+    setError(null);
+    setCached(false);
+  }, []);
+
+  return {
+    chunks,
+    fullResponse: chunks.join(''),
+    isStreaming,
+    error,
+    cached,
+    streamMessage,
+    cancelStream,
+    clearResponse
+  };
+}
+```
+
+### Chat Component (React)
+
+```tsx
+// components/Chat.tsx
+import { useState, FormEvent } from 'react';
+import { useSseChat } from '../hooks/useSseChat';
+import { Message } from '../models/conversation.models';
+
+export function Chat() {
+  const [conversationId, setConversationId] = useState<string | null>(null);
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [prompt, setPrompt] = useState('');
+  
+  const {
+    fullResponse,
+    isStreaming,
+    error,
+    cached,
+    streamMessage,
+    cancelStream,
+    clearResponse
+  } = useSseChat();
+
+  const startConversation = async () => {
+    const response = await fetch('http://localhost:8000/conversations', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: 'New Chat' })
+    });
+    const data = await response.json();
+    setConversationId(data.id);
+  };
+
+  const sendMessage = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!prompt.trim() || !conversationId) return;
+
+    const userMessage: Message = {
+      id: crypto.randomUUID(),
+      conversation_id: conversationId,
+      role: 'user',
+      content: prompt,
+      timestamp: new Date().toISOString()
+    };
+    setMessages(prev => [...prev, userMessage]);
+    const currentPrompt = prompt;
+    setPrompt('');
+
+    await streamMessage(conversationId, currentPrompt);
+
+    if (fullResponse && !error) {
+      const assistantMessage: Message = {
+        id: crypto.randomUUID(),
+        conversation_id: conversationId,
+        role: 'assistant',
+        content: fullResponse,
+        timestamp: new Date().toISOString(),
+        cached
+      };
+      setMessages(prev => [...prev, assistantMessage]);
+      clearResponse();
+    }
+  };
+
+  return (
+    <div className="chat-container">
+      <h2>Chat</h2>
+
+      {!conversationId ? (
+        <button onClick={startConversation}>Start New Conversation</button>
+      ) : (
+        <>
+          <div className="messages">
+            {messages.map(msg => (
+              <div key={msg.id} className={`message message--${msg.role}`}>
+                <strong>{msg.role}:</strong>
+                <p>{msg.content}</p>
+              </div>
+            ))}
+
+            {(isStreaming || fullResponse) && (
+              <div className="message message--assistant">
+                <strong>assistant:</strong>
+                <p>{fullResponse}</p>
+                {isStreaming && <span className="typing-indicator">▌</span>}
+              </div>
+            )}
+          </div>
+
+          {error && <div className="error">{error}</div>}
+
+          <form onSubmit={sendMessage}>
+            <textarea
+              value={prompt}
+              onChange={e => setPrompt(e.target.value)}
+              placeholder="Type your message..."
+              rows={3}
+              disabled={isStreaming}
+            />
+            <button type="submit" disabled={isStreaming || !prompt.trim()}>
+              {isStreaming ? 'Streaming...' : 'Send'}
+            </button>
+            {isStreaming && (
+              <button type="button" onClick={cancelStream}>Cancel</button>
+            )}
+          </form>
+        </>
+      )}
+    </div>
+  );
+}
+```
+
+---
 
 ## Environment Variables
 
@@ -237,7 +833,6 @@ wscat -c ws://localhost:8000/ws/ask
 |----------|-------------|---------|
 | `MONGO_URI` | MongoDB connection | mongodb://mongo:27017 |
 | `DB_NAME` | Database name | ollama |
-| `COLLECTION_NAME` | Collection name | responses |
 
 ## Docker Services
 
@@ -249,788 +844,11 @@ wscat -c ws://localhost:8000/ws/ask
 | Redis | redis | 6379 |
 | RedisInsight | redis-ui | 8002 |
 
-## Development
-
-To run with hot-reload enabled (default in development):
-
-```bash
-docker-compose up --build
-```
-
-The FastAPI service mounts the local directory as a volume, so changes to Python files will automatically reload the server.
-
----
-
-## Frontend Integration
-
-The backend has CORS enabled (`allow_origins=["*"]`), so frontend apps running on `localhost:4200` (Angular) or `localhost:5173` (React/Vite) will work without issues.
-
-### TypeScript Interfaces
-
-Create these interfaces to type your API requests and responses:
-
-```typescript
-// models/llm.models.ts
-
-export interface PromptRequest {
-  prompt: string;
-}
-
-export interface LlmResponse {
-  response: string;
-  cached: boolean;
-}
-
-export interface HealthCheckResponse {
-  app_name: string;
-  env: string;
-  host: string;
-  port: string;
-  message: string;
-}
-
-export interface JokeResponse {
-  result: string;
-}
-
-// WebSocket message types
-export interface WsPromptRequest {
-  prompt: string;
-}
-
-export interface WsChunkMessage {
-  chunk: string;
-  done: boolean;
-  cached: boolean;
-}
-
-export interface WsErrorMessage {
-  error: 'validation' | 'llm_unavailable' | 'timeout' | 'internal';
-  message: string;
-}
-
-export type WsMessage = WsChunkMessage | WsErrorMessage;
-
-export function isWsError(msg: WsMessage): msg is WsErrorMessage {
-  return 'error' in msg;
-}
-```
-
-### REST API Reference
-
-| Endpoint | Method | Request Body | Response Type |
-|----------|--------|--------------|---------------|
-| `/` | GET | - | `HealthCheckResponse` |
-| `/ask` | POST | `{ prompt: string }` | `{ response: string, cached: boolean }` |
-| `/joker` | GET | - | `{ result: string }` |
-
-### WebSocket API Reference
-
-| Endpoint | Send | Receive |
-|----------|------|---------|
-| `ws://localhost:8000/ws/ask` | `{ prompt: string }` | `{ chunk, done, cached }` or `{ error, message }` |
-
-**Response Messages:**
-- **Chunk**: `{ "chunk": "token", "done": false, "cached": false }`
-- **Complete**: `{ "chunk": "", "done": true, "cached": false }`
-- **Error**: `{ "error": "llm_unavailable", "message": "..." }`
-
----
-
-## Angular Integration (REST)
-
-### App Configuration
-
-```typescript
-// app.config.ts
-import { ApplicationConfig } from '@angular/core';
-import { provideHttpClient, withInterceptors } from '@angular/common/http';
-
-export const appConfig: ApplicationConfig = {
-  providers: [
-    provideHttpClient(withInterceptors([]))
-  ]
-};
-```
-
-### LLM Service
-
-```typescript
-// services/llm.service.ts
-import { Injectable, inject, signal } from '@angular/core';
-import { HttpClient } from '@angular/common/http';
-import { Observable, tap, catchError, of } from 'rxjs';
-import { PromptRequest, LlmResponse, HealthCheckResponse, JokeResponse } from '../models/llm.models';
-
-@Injectable({ providedIn: 'root' })
-export class LlmService {
-  private readonly http = inject(HttpClient);
-  private readonly baseUrl = 'http://localhost:8000';
-
-  readonly loading = signal(false);
-  readonly error = signal<string | null>(null);
-  readonly lastResponse = signal<LlmResponse | null>(null);
-
-  askPrompt(prompt: string): Observable<LlmResponse> {
-    this.loading.set(true);
-    this.error.set(null);
-    
-    const request: PromptRequest = { prompt };
-    
-    return this.http.post<LlmResponse>(`${this.baseUrl}/ask`, request).pipe(
-      tap((response) => {
-        this.lastResponse.set(response);
-        this.loading.set(false);
-      }),
-      catchError((err) => {
-        this.error.set(err.message || 'An error occurred');
-        this.loading.set(false);
-        throw err;
-      })
-    );
-  }
-
-  healthCheck(): Observable<HealthCheckResponse> {
-    return this.http.get<HealthCheckResponse>(this.baseUrl);
-  }
-
-  getJoke(): Observable<JokeResponse> {
-    return this.http.get<JokeResponse>(`${this.baseUrl}/joker`);
-  }
-}
-```
-
-### Example Component
-
-```typescript
-// components/chat.component.ts
-import { Component, inject, signal } from '@angular/core';
-import { FormsModule } from '@angular/forms';
-import { LlmService } from '../services/llm.service';
-
-@Component({
-  selector: 'app-chat',
-  standalone: true,
-  imports: [FormsModule],
-  template: `
-    <div class="chat-container">
-      <h2>Ollama Chat</h2>
-      
-      <textarea 
-        [(ngModel)]="prompt" 
-        placeholder="Enter your prompt..."
-        rows="4"
-      ></textarea>
-      
-      <button (click)="sendPrompt()" [disabled]="llmService.loading()">
-        @if (llmService.loading()) {
-          Thinking...
-        } @else {
-          Send
-        }
-      </button>
-
-      @if (llmService.error(); as error) {
-        <div class="error">{{ error }}</div>
-      }
-
-      @if (llmService.lastResponse(); as response) {
-        <div class="response">
-          <p>{{ response.response }}</p>
-          <small class="cache-indicator">
-            @if (response.cached) {
-              ⚡ From cache
-            } @else {
-              🔄 Fresh response
-            }
-          </small>
-        </div>
-      }
-    </div>
-  `
-})
-export class ChatComponent {
-  protected readonly llmService = inject(LlmService);
-  protected prompt = '';
-
-  sendPrompt(): void {
-    if (!this.prompt.trim()) return;
-
-    this.llmService.askPrompt(this.prompt).subscribe({
-      next: () => console.log('Response received'),
-      error: (err) => console.error('Error:', err)
-    });
-  }
-}
-```
-
----
-
-## Angular Integration (WebSocket)
-
-### WebSocket Service
-
-```typescript
-// services/llm-websocket.service.ts
-import { Injectable, inject, signal, computed } from '@angular/core';
-import { webSocket, WebSocketSubject } from 'rxjs/webSocket';
-import { Subject, timer } from 'rxjs';
-import { retry, takeUntil } from 'rxjs/operators';
-import { WsMessage, WsChunkMessage, isWsError } from '../models/llm.models';
-
-@Injectable({ providedIn: 'root' })
-export class LlmWebSocketService {
-  private socket$: WebSocketSubject<any> | null = null;
-  private readonly wsUrl = 'ws://localhost:8000/ws/ask';
-  private destroy$ = new Subject<void>();
-  private reconnectAttempts = 0;
-
-  readonly chunks = signal<string[]>([]);
-  readonly loading = signal(false);
-  readonly error = signal<string | null>(null);
-  readonly connected = signal(false);
-  readonly cached = signal(false);
-
-  readonly fullResponse = computed(() => this.chunks().join(''));
-
-  connect(): void {
-    if (this.socket$) return;
-
-    this.socket$ = webSocket({
-      url: this.wsUrl,
-      openObserver: {
-        next: () => {
-          this.connected.set(true);
-          this.reconnectAttempts = 0;
-          console.log('WebSocket connected');
-        }
-      },
-      closeObserver: {
-        next: () => {
-          this.connected.set(false);
-          console.log('WebSocket disconnected');
-          this.scheduleReconnect();
-        }
-      }
-    });
-
-    this.socket$.pipe(takeUntil(this.destroy$)).subscribe({
-      next: (msg: WsMessage) => this.handleMessage(msg),
-      error: (err) => {
-        console.error('WebSocket error:', err);
-        this.error.set('Connection error');
-        this.loading.set(false);
-      }
-    });
-  }
-
-  private scheduleReconnect(): void {
-    if (this.reconnectAttempts >= 5) {
-      this.error.set('Connection failed after multiple attempts');
-      return;
-    }
-
-    const delay = this.getReconnectDelay(this.reconnectAttempts);
-    this.reconnectAttempts++;
-    
-    timer(delay).pipe(takeUntil(this.destroy$)).subscribe(() => {
-      this.socket$ = null;
-      this.connect();
-    });
-  }
-
-  private getReconnectDelay(attempt: number): number {
-    if (attempt <= 1) return 1000;
-    return Math.min(1000 * Math.pow(2, attempt - 1), 30000);
-  }
-
-  private handleMessage(msg: WsMessage): void {
-    if (isWsError(msg)) {
-      this.error.set(msg.message);
-      this.loading.set(false);
-      return;
-    }
-
-    const chunk = msg as WsChunkMessage;
-    
-    if (chunk.chunk) {
-      this.chunks.update(c => [...c, chunk.chunk]);
-    }
-
-    if (chunk.done) {
-      this.loading.set(false);
-      this.cached.set(chunk.cached);
-    }
-  }
-
-  askPrompt(prompt: string): void {
-    if (!this.socket$ || !this.connected()) {
-      this.error.set('Not connected');
-      return;
-    }
-
-    this.chunks.set([]);
-    this.error.set(null);
-    this.loading.set(true);
-    this.cached.set(false);
-
-    this.socket$.next({ prompt });
-  }
-
-  disconnect(): void {
-    this.destroy$.next();
-    this.socket$?.complete();
-    this.socket$ = null;
-  }
-}
-```
-
-### WebSocket Chat Component
-
-```typescript
-// components/chat-ws.component.ts
-import { Component, inject, OnInit, OnDestroy } from '@angular/core';
-import { FormsModule } from '@angular/forms';
-import { LlmWebSocketService } from '../services/llm-websocket.service';
-
-@Component({
-  selector: 'app-chat-ws',
-  standalone: true,
-  imports: [FormsModule],
-  template: `
-    <div class="chat-container">
-      <h2>Ollama Chat (WebSocket)</h2>
-      
-      <div class="status">
-        @if (ws.connected()) {
-          <span class="connected">● Connected</span>
-        } @else {
-          <span class="disconnected">○ Disconnected</span>
-        }
-      </div>
-      
-      <textarea 
-        [(ngModel)]="prompt" 
-        placeholder="Enter your prompt..."
-        rows="4"
-      ></textarea>
-      
-      <button (click)="sendPrompt()" [disabled]="ws.loading() || !ws.connected()">
-        @if (ws.loading()) {
-          Streaming...
-        } @else {
-          Send
-        }
-      </button>
-
-      @if (ws.error(); as error) {
-        <div class="error">{{ error }}</div>
-      }
-
-      @if (ws.fullResponse(); as response) {
-        <div class="response">
-          <p>{{ response }}</p>
-          @if (!ws.loading()) {
-            <small class="cache-indicator">
-              @if (ws.cached()) {
-                ⚡ From cache
-              } @else {
-                🔄 Fresh response
-              }
-            </small>
-          }
-        </div>
-      }
-    </div>
-  `
-})
-export class ChatWsComponent implements OnInit, OnDestroy {
-  protected readonly ws = inject(LlmWebSocketService);
-  protected prompt = '';
-
-  ngOnInit(): void {
-    this.ws.connect();
-  }
-
-  ngOnDestroy(): void {
-    this.ws.disconnect();
-  }
-
-  sendPrompt(): void {
-    if (!this.prompt.trim()) return;
-    this.ws.askPrompt(this.prompt);
-  }
-}
-```
-
----
-
-## React + TypeScript Integration (REST)
-
-### API Client
-
-```typescript
-// api/llm-api.ts
-import { PromptRequest, LlmResponse, HealthCheckResponse, JokeResponse } from '../models/llm.models';
-
-const BASE_URL = 'http://localhost:8000';
-
-export const llmApi = {
-  async askPrompt(prompt: string): Promise<LlmResponse> {
-    const request: PromptRequest = { prompt };
-    
-    const response = await fetch(`${BASE_URL}/ask`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(request),
-    });
-
-    if (!response.ok) {
-      throw new Error(`HTTP error! status: ${response.status}`);
-    }
-
-    return response.json();
-  },
-
-  async healthCheck(): Promise<HealthCheckResponse> {
-    const response = await fetch(BASE_URL);
-    
-    if (!response.ok) {
-      throw new Error(`HTTP error! status: ${response.status}`);
-    }
-
-    return response.json();
-  },
-
-  async getJoke(): Promise<JokeResponse> {
-    const response = await fetch(`${BASE_URL}/joker`);
-    
-    if (!response.ok) {
-      throw new Error(`HTTP error! status: ${response.status}`);
-    }
-
-    return response.json();
-  },
-};
-```
-
-### Custom Hook
-
-```typescript
-// hooks/useLlm.ts
-import { useState, useCallback } from 'react';
-import { llmApi } from '../api/llm-api';
-import { LlmResponse } from '../models/llm.models';
-
-interface UseLlmReturn {
-  response: LlmResponse | null;
-  loading: boolean;
-  error: string | null;
-  askPrompt: (prompt: string) => Promise<void>;
-  clearResponse: () => void;
-}
-
-export function useLlm(): UseLlmReturn {
-  const [response, setResponse] = useState<LlmResponse | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const askPrompt = useCallback(async (prompt: string) => {
-    setLoading(true);
-    setError(null);
-
-    try {
-      const result = await llmApi.askPrompt(prompt);
-      setResponse(result);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'An error occurred');
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  const clearResponse = useCallback(() => {
-    setResponse(null);
-    setError(null);
-  }, []);
-
-  return { response, loading, error, askPrompt, clearResponse };
-}
-```
-
-### Example Component
-
-```tsx
-// components/Chat.tsx
-import { useState, FormEvent } from 'react';
-import { useLlm } from '../hooks/useLlm';
-
-export function Chat() {
-  const [prompt, setPrompt] = useState('');
-  const { response, loading, error, askPrompt } = useLlm();
-
-  const handleSubmit = async (e: FormEvent) => {
-    e.preventDefault();
-    if (!prompt.trim()) return;
-    await askPrompt(prompt);
-  };
-
-  return (
-    <div className="chat-container">
-      <h2>Ollama Chat</h2>
-
-      <form onSubmit={handleSubmit}>
-        <textarea
-          value={prompt}
-          onChange={(e) => setPrompt(e.target.value)}
-          placeholder="Enter your prompt..."
-          rows={4}
-        />
-
-        <button type="submit" disabled={loading}>
-          {loading ? 'Thinking...' : 'Send'}
-        </button>
-      </form>
-
-      {error && <div className="error">{error}</div>}
-
-      {response && (
-        <div className="response">
-          <p>{response.response}</p>
-          <small className="cache-indicator">
-            {response.cached ? '⚡ From cache' : '🔄 Fresh response'}
-          </small>
-        </div>
-      )}
-    </div>
-  );
-}
-```
-
-### Alternative: Using React Query (TanStack Query)
-
-```typescript
-// hooks/useLlmQuery.ts
-import { useMutation } from '@tanstack/react-query';
-import { llmApi } from '../api/llm-api';
-
-export function useAskPrompt() {
-  return useMutation({
-    mutationFn: (prompt: string) => llmApi.askPrompt(prompt),
-  });
-}
-
-// Usage in component:
-// const { mutate: askPrompt, data: response, isPending, error } = useAskPrompt();
-```
-
----
-
-## React + TypeScript Integration (WebSocket)
-
-### WebSocket Hook
-
-```typescript
-// hooks/useLlmWebSocket.ts
-import { useState, useCallback, useRef, useEffect } from 'react';
-import { WsMessage, WsChunkMessage, isWsError } from '../models/llm.models';
-
-interface UseLlmWebSocketReturn {
-  chunks: string[];
-  fullResponse: string;
-  loading: boolean;
-  error: string | null;
-  connected: boolean;
-  cached: boolean;
-  connect: () => void;
-  disconnect: () => void;
-  askPrompt: (prompt: string) => void;
-}
-
-export function useLlmWebSocket(): UseLlmWebSocketReturn {
-  const [chunks, setChunks] = useState<string[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [connected, setConnected] = useState(false);
-  const [cached, setCached] = useState(false);
-  
-  const wsRef = useRef<WebSocket | null>(null);
-  const reconnectAttempts = useRef(0);
-  const reconnectTimeout = useRef<NodeJS.Timeout>();
-
-  const getReconnectDelay = (attempt: number): number => {
-    if (attempt <= 1) return 1000;
-    return Math.min(1000 * Math.pow(2, attempt - 1), 30000);
-  };
-
-  const connect = useCallback(() => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) return;
-
-    const ws = new WebSocket('ws://localhost:8000/ws/ask');
-
-    ws.onopen = () => {
-      setConnected(true);
-      setError(null);
-      reconnectAttempts.current = 0;
-      console.log('WebSocket connected');
-    };
-
-    ws.onclose = () => {
-      setConnected(false);
-      console.log('WebSocket disconnected');
-      
-      if (reconnectAttempts.current < 5) {
-        const delay = getReconnectDelay(reconnectAttempts.current);
-        reconnectAttempts.current++;
-        reconnectTimeout.current = setTimeout(connect, delay);
-      } else {
-        setError('Connection failed after multiple attempts');
-      }
-    };
-
-    ws.onerror = () => {
-      setError('WebSocket error');
-      setLoading(false);
-    };
-
-    ws.onmessage = (event) => {
-      const msg: WsMessage = JSON.parse(event.data);
-
-      if (isWsError(msg)) {
-        setError(msg.message);
-        setLoading(false);
-        return;
-      }
-
-      const chunk = msg as WsChunkMessage;
-
-      if (chunk.chunk) {
-        setChunks(prev => [...prev, chunk.chunk]);
-      }
-
-      if (chunk.done) {
-        setLoading(false);
-        setCached(chunk.cached);
-      }
-    };
-
-    wsRef.current = ws;
-  }, []);
-
-  const disconnect = useCallback(() => {
-    if (reconnectTimeout.current) {
-      clearTimeout(reconnectTimeout.current);
-    }
-    wsRef.current?.close();
-    wsRef.current = null;
-  }, []);
-
-  const askPrompt = useCallback((prompt: string) => {
-    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
-      setError('Not connected');
-      return;
-    }
-
-    setChunks([]);
-    setError(null);
-    setLoading(true);
-    setCached(false);
-
-    wsRef.current.send(JSON.stringify({ prompt }));
-  }, []);
-
-  useEffect(() => {
-    return () => {
-      disconnect();
-    };
-  }, [disconnect]);
-
-  return {
-    chunks,
-    fullResponse: chunks.join(''),
-    loading,
-    error,
-    connected,
-    cached,
-    connect,
-    disconnect,
-    askPrompt,
-  };
-}
-```
-
-### WebSocket Chat Component
-
-```tsx
-// components/ChatWebSocket.tsx
-import { useEffect, useState, FormEvent } from 'react';
-import { useLlmWebSocket } from '../hooks/useLlmWebSocket';
-
-export function ChatWebSocket() {
-  const [prompt, setPrompt] = useState('');
-  const { 
-    fullResponse, 
-    loading, 
-    error, 
-    connected, 
-    cached,
-    connect, 
-    askPrompt 
-  } = useLlmWebSocket();
-
-  useEffect(() => {
-    connect();
-  }, [connect]);
-
-  const handleSubmit = (e: FormEvent) => {
-    e.preventDefault();
-    if (!prompt.trim() || !connected) return;
-    askPrompt(prompt);
-  };
-
-  return (
-    <div className="chat-container">
-      <h2>Ollama Chat (WebSocket)</h2>
-
-      <div className="status">
-        {connected ? (
-          <span className="connected">● Connected</span>
-        ) : (
-          <span className="disconnected">○ Disconnected</span>
-        )}
-      </div>
-
-      <form onSubmit={handleSubmit}>
-        <textarea
-          value={prompt}
-          onChange={(e) => setPrompt(e.target.value)}
-          placeholder="Enter your prompt..."
-          rows={4}
-        />
-
-        <button type="submit" disabled={loading || !connected}>
-          {loading ? 'Streaming...' : 'Send'}
-        </button>
-      </form>
-
-      {error && <div className="error">{error}</div>}
-
-      {fullResponse && (
-        <div className="response">
-          <p>{fullResponse}</p>
-          {!loading && (
-            <small className="cache-indicator">
-              {cached ? '⚡ From cache' : '🔄 Fresh response'}
-            </small>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-```
+## Conversation Limits
+
+- **Max messages per conversation**: 100
+- **Context window**: Last 10 messages sent to LLM
+- **Cache TTL**: 1 hour
 
 ---
 

@@ -1,0 +1,744 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SSE Test - Ollama Chat</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            min-height: 100vh;
+            color: #e4e4e4;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+        }
+        
+        h1 {
+            text-align: center;
+            margin-bottom: 20px;
+            color: #00d4ff;
+        }
+        
+        .panel {
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 20px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        
+        .panel h2 {
+            font-size: 14px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            color: #888;
+            margin-bottom: 15px;
+        }
+        
+        .status {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-size: 14px;
+            margin-bottom: 15px;
+        }
+        
+        .status.no-conversation {
+            background: rgba(255, 193, 7, 0.2);
+            color: #ffc107;
+        }
+        
+        .status.ready {
+            background: rgba(76, 175, 80, 0.2);
+            color: #4caf50;
+        }
+        
+        .status.streaming {
+            background: rgba(33, 150, 243, 0.2);
+            color: #2196f3;
+        }
+        
+        .status.error {
+            background: rgba(244, 67, 54, 0.2);
+            color: #f44336;
+        }
+        
+        .controls {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            margin-bottom: 15px;
+        }
+        
+        button {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 500;
+            transition: all 0.2s;
+        }
+        
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        
+        .btn-primary {
+            background: #00d4ff;
+            color: #1a1a2e;
+        }
+        
+        .btn-primary:hover:not(:disabled) {
+            background: #00a8cc;
+        }
+        
+        .btn-secondary {
+            background: rgba(255, 255, 255, 0.1);
+            color: #e4e4e4;
+        }
+        
+        .btn-secondary:hover:not(:disabled) {
+            background: rgba(255, 255, 255, 0.2);
+        }
+        
+        .btn-danger {
+            background: #f44336;
+            color: white;
+        }
+        
+        .btn-danger:hover:not(:disabled) {
+            background: #d32f2f;
+        }
+        
+        .conversation-info {
+            background: rgba(0, 0, 0, 0.2);
+            padding: 12px;
+            border-radius: 8px;
+            font-family: monospace;
+            font-size: 13px;
+            word-break: break-all;
+        }
+        
+        .conversation-info span {
+            color: #00d4ff;
+        }
+        
+        .messages {
+            height: 400px;
+            overflow-y: auto;
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 8px;
+            padding: 15px;
+            margin-bottom: 15px;
+        }
+        
+        .message {
+            margin-bottom: 15px;
+            animation: fadeIn 0.3s ease;
+        }
+        
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        
+        .message-header {
+            font-size: 12px;
+            color: #888;
+            margin-bottom: 5px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .message-role {
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+        
+        .message-role.user {
+            color: #4caf50;
+        }
+        
+        .message-role.assistant {
+            color: #00d4ff;
+        }
+        
+        .message-content {
+            background: rgba(255, 255, 255, 0.05);
+            padding: 12px 15px;
+            border-radius: 8px;
+            line-height: 1.6;
+            white-space: pre-wrap;
+        }
+        
+        .message.user .message-content {
+            background: rgba(76, 175, 80, 0.15);
+            border-left: 3px solid #4caf50;
+        }
+        
+        .message.assistant .message-content {
+            background: rgba(0, 212, 255, 0.1);
+            border-left: 3px solid #00d4ff;
+        }
+        
+        .typing-indicator {
+            display: inline-block;
+            animation: blink 0.7s infinite;
+            color: #00d4ff;
+            font-weight: bold;
+        }
+        
+        @keyframes blink {
+            0%, 50% { opacity: 1; }
+            51%, 100% { opacity: 0; }
+        }
+        
+        .badge {
+            font-size: 10px;
+            padding: 2px 6px;
+            border-radius: 4px;
+            text-transform: uppercase;
+        }
+        
+        .badge.cached {
+            background: rgba(255, 193, 7, 0.2);
+            color: #ffc107;
+        }
+        
+        .badge.fresh {
+            background: rgba(76, 175, 80, 0.2);
+            color: #4caf50;
+        }
+        
+        .input-group {
+            display: flex;
+            gap: 10px;
+        }
+        
+        textarea {
+            flex: 1;
+            padding: 12px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 8px;
+            background: rgba(0, 0, 0, 0.3);
+            color: #e4e4e4;
+            font-size: 14px;
+            resize: none;
+            font-family: inherit;
+        }
+        
+        textarea:focus {
+            outline: none;
+            border-color: #00d4ff;
+        }
+        
+        textarea::placeholder {
+            color: #666;
+        }
+        
+        .stats {
+            display: flex;
+            gap: 20px;
+            font-size: 13px;
+            color: #888;
+            margin-top: 10px;
+        }
+        
+        .stats span {
+            color: #00d4ff;
+        }
+        
+        .log {
+            height: 150px;
+            overflow-y: auto;
+            background: rgba(0, 0, 0, 0.4);
+            border-radius: 8px;
+            padding: 10px;
+            font-family: monospace;
+            font-size: 12px;
+        }
+        
+        .log-entry {
+            margin-bottom: 4px;
+            opacity: 0.8;
+        }
+        
+        .log-entry.error {
+            color: #f44336;
+        }
+        
+        .log-entry.success {
+            color: #4caf50;
+        }
+        
+        .log-entry.info {
+            color: #2196f3;
+        }
+        
+        .empty-state {
+            text-align: center;
+            color: #666;
+            padding: 40px;
+        }
+        
+        .conversation-list {
+            max-height: 200px;
+            overflow-y: auto;
+        }
+        
+        .conversation-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px;
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 6px;
+            margin-bottom: 8px;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        
+        .conversation-item:hover {
+            background: rgba(0, 0, 0, 0.4);
+        }
+        
+        .conversation-item.active {
+            background: rgba(0, 212, 255, 0.2);
+            border: 1px solid #00d4ff;
+        }
+        
+        .conversation-item-info {
+            flex: 1;
+        }
+        
+        .conversation-item-title {
+            font-weight: 500;
+            margin-bottom: 4px;
+        }
+        
+        .conversation-item-meta {
+            font-size: 12px;
+            color: #666;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔌 SSE Chat Test</h1>
+        
+        <!-- Conversations Panel -->
+        <div class="panel">
+            <h2>Conversations</h2>
+            <div class="controls">
+                <button class="btn-primary" onclick="createConversation()">+ New Conversation</button>
+                <button class="btn-secondary" onclick="loadConversations()">↻ Refresh List</button>
+            </div>
+            <div id="conversationList" class="conversation-list">
+                <div class="empty-state">Click "New Conversation" to start</div>
+            </div>
+        </div>
+        
+        <!-- Chat Panel -->
+        <div class="panel">
+            <h2>Chat</h2>
+            
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                <div id="status" class="status no-conversation">
+                    ○ No conversation selected
+                </div>
+                <button id="reloadBtn" class="btn-secondary" onclick="reloadCurrentConversation()" style="display: none; font-size: 12px; padding: 6px 12px;">↻ Reload</button>
+            </div>
+            
+            <div id="conversationInfo" class="conversation-info" style="display: none;">
+                ID: <span id="currentConvId">-</span>
+            </div>
+            
+            <div id="messages" class="messages">
+                <div class="empty-state">Select or create a conversation to start chatting</div>
+            </div>
+            
+            <div class="input-group">
+                <textarea 
+                    id="prompt" 
+                    placeholder="Type your message... (Shift+Enter for new line, Enter to send)"
+                    rows="3"
+                    disabled
+                    onkeydown="handleKeydown(event)"
+                ></textarea>
+                <div style="display: flex; flex-direction: column; gap: 8px;">
+                    <button id="sendBtn" class="btn-primary" onclick="sendMessage()" disabled>Send</button>
+                    <button id="cancelBtn" class="btn-danger" onclick="cancelStream()" style="display: none;">Cancel</button>
+                </div>
+            </div>
+            
+            <div class="stats">
+                <div>Messages: <span id="messageCount">0</span></div>
+                <div>Chunks: <span id="chunkCount">0</span></div>
+                <div>Response time: <span id="responseTime">-</span></div>
+            </div>
+        </div>
+        
+        <!-- Log Panel -->
+        <div class="panel">
+            <h2>Event Log</h2>
+            <div id="log" class="log"></div>
+        </div>
+    </div>
+
+    <script>
+        const API_BASE = 'http://localhost:8000';
+        
+        let currentConversationId = null;
+        let abortController = null;
+        let isStreaming = false;
+        let chunkCount = 0;
+        let startTime = null;
+        
+        // Logging
+        function log(message, type = 'info') {
+            const logEl = document.getElementById('log');
+            const time = new Date().toLocaleTimeString();
+            const entry = document.createElement('div');
+            entry.className = `log-entry ${type}`;
+            entry.textContent = `[${time}] ${message}`;
+            logEl.appendChild(entry);
+            logEl.scrollTop = logEl.scrollHeight;
+        }
+        
+        // Update status
+        function setStatus(text, type) {
+            const statusEl = document.getElementById('status');
+            statusEl.textContent = text;
+            statusEl.className = `status ${type}`;
+        }
+        
+        // Load conversations
+        async function loadConversations() {
+            try {
+                log('Loading conversations...');
+                const response = await fetch(`${API_BASE}/conversations?limit=20`);
+                const data = await response.json();
+                
+                const listEl = document.getElementById('conversationList');
+                
+                if (data.items.length === 0) {
+                    listEl.innerHTML = '<div class="empty-state">No conversations yet</div>';
+                    return;
+                }
+                
+                listEl.innerHTML = data.items.map(conv => `
+                    <div class="conversation-item ${conv.id === currentConversationId ? 'active' : ''}" 
+                         onclick="selectConversation('${conv.id}')">
+                        <div class="conversation-item-info">
+                            <div class="conversation-item-title">${conv.title || 'Untitled'}</div>
+                            <div class="conversation-item-meta">${conv.message_count} messages • ${new Date(conv.updated_at).toLocaleString()}</div>
+                        </div>
+                    </div>
+                `).join('');
+                
+                log(`Loaded ${data.items.length} conversations`, 'success');
+            } catch (error) {
+                log(`Failed to load conversations: ${error.message}`, 'error');
+            }
+        }
+        
+        // Create conversation
+        async function createConversation() {
+            try {
+                log('Creating new conversation...');
+                const response = await fetch(`${API_BASE}/conversations`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ title: `Chat ${new Date().toLocaleString()}` })
+                });
+                
+                const conv = await response.json();
+                log(`Created conversation: ${conv.id}`, 'success');
+                
+                await loadConversations();
+                selectConversation(conv.id);
+            } catch (error) {
+                log(`Failed to create conversation: ${error.message}`, 'error');
+            }
+        }
+        
+        // Reload current conversation messages from server
+        async function reloadCurrentConversation() {
+            if (currentConversationId) {
+                log('Reloading conversation from server...');
+                await selectConversation(currentConversationId);
+            }
+        }
+        
+        // Select conversation
+        async function selectConversation(id) {
+            currentConversationId = id;
+            document.getElementById('currentConvId').textContent = id;
+            document.getElementById('conversationInfo').style.display = 'block';
+            document.getElementById('prompt').disabled = false;
+            document.getElementById('sendBtn').disabled = false;
+            document.getElementById('reloadBtn').style.display = 'block';
+            
+            setStatus('● Ready', 'ready');
+            
+            // Update active state in list
+            document.querySelectorAll('.conversation-item').forEach(el => {
+                el.classList.toggle('active', el.onclick.toString().includes(id));
+            });
+            
+            // Load messages
+            try {
+                log(`Loading conversation ${id}...`);
+                const response = await fetch(`${API_BASE}/conversations/${id}`);
+                const conv = await response.json();
+                
+                const messagesEl = document.getElementById('messages');
+                
+                if (conv.messages.length === 0) {
+                    messagesEl.innerHTML = '<div class="empty-state">No messages yet. Start chatting!</div>';
+                } else {
+                    messagesEl.innerHTML = conv.messages.map(msg => createMessageHTML(msg)).join('');
+                    messagesEl.scrollTop = messagesEl.scrollHeight;
+                }
+                
+                document.getElementById('messageCount').textContent = conv.message_count;
+                log(`Loaded ${conv.messages.length} messages`, 'success');
+            } catch (error) {
+                log(`Failed to load conversation: ${error.message}`, 'error');
+            }
+        }
+        
+        // Create message HTML
+        function createMessageHTML(msg) {
+            const badge = msg.cached !== null && msg.cached !== undefined
+                ? `<span class="badge ${msg.cached ? 'cached' : 'fresh'}">${msg.cached ? '⚡ cached' : '🔄 fresh'}</span>`
+                : '';
+            
+            return `
+                <div class="message ${msg.role}">
+                    <div class="message-header">
+                        <span class="message-role ${msg.role}">${msg.role}</span>
+                        ${badge}
+                        <span>${new Date(msg.timestamp).toLocaleTimeString()}</span>
+                    </div>
+                    <div class="message-content">${escapeHtml(msg.content)}</div>
+                </div>
+            `;
+        }
+        
+        // Escape HTML
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+        
+        // Handle keydown
+        function handleKeydown(event) {
+            if (event.key === 'Enter' && !event.shiftKey) {
+                event.preventDefault();
+                sendMessage();
+            }
+        }
+        
+        // Send message
+        async function sendMessage() {
+            const promptEl = document.getElementById('prompt');
+            const prompt = promptEl.value.trim();
+            
+            if (!prompt || !currentConversationId || isStreaming) return;
+            
+            // Reset
+            chunkCount = 0;
+            document.getElementById('chunkCount').textContent = '0';
+            document.getElementById('responseTime').textContent = '-';
+            
+            // Add user message to UI
+            const messagesEl = document.getElementById('messages');
+            if (messagesEl.querySelector('.empty-state')) {
+                messagesEl.innerHTML = '';
+            }
+            
+            const userMsg = {
+                role: 'user',
+                content: prompt,
+                timestamp: new Date().toISOString()
+            };
+            messagesEl.innerHTML += createMessageHTML(userMsg);
+            
+            // Clear input
+            promptEl.value = '';
+            
+            // Create assistant message placeholder with unique ID
+            const streamingId = 'streaming-' + Date.now();
+            const assistantDiv = document.createElement('div');
+            assistantDiv.className = 'message assistant';
+            assistantDiv.id = streamingId;
+            assistantDiv.innerHTML = `
+                <div class="message-header">
+                    <span class="message-role assistant">assistant</span>
+                    <span class="streaming-badge"></span>
+                </div>
+                <div class="message-content streaming-content"><span class="typing-indicator">▌</span></div>
+            `;
+            messagesEl.appendChild(assistantDiv);
+            messagesEl.scrollTop = messagesEl.scrollHeight;
+            
+            // Get references to the elements we'll update
+            const streamingContentEl = assistantDiv.querySelector('.streaming-content');
+            const streamingBadgeEl = assistantDiv.querySelector('.streaming-badge');
+            
+            // Update UI state
+            isStreaming = true;
+            setStatus('◉ Streaming...', 'streaming');
+            document.getElementById('sendBtn').disabled = true;
+            document.getElementById('cancelBtn').style.display = 'block';
+            promptEl.disabled = true;
+            
+            // Start streaming
+            startTime = Date.now();
+            abortController = new AbortController();
+            
+            let fullResponse = '';
+            let cached = false;
+            let receivedDone = false;
+            
+            try {
+                log(`Sending: "${prompt.substring(0, 50)}${prompt.length > 50 ? '...' : ''}"`);
+                
+                const response = await fetch(`${API_BASE}/conversations/${currentConversationId}/stream`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ prompt }),
+                    signal: abortController.signal
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}`);
+                }
+                
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = '';
+                
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    
+                    buffer += decoder.decode(value, { stream: true });
+                    const lines = buffer.split('\n');
+                    buffer = lines.pop() || '';
+                    
+                    for (const line of lines) {
+                        // Skip event: lines (SSE format)
+                        if (line.startsWith('event:')) continue;
+                        
+                        if (line.startsWith('data: ')) {
+                            const jsonStr = line.slice(6).trim();
+                            if (jsonStr) {
+                                try {
+                                    const event = JSON.parse(jsonStr);
+                                    console.log('SSE event:', event); // Debug log
+                                    
+                                    if (event.error) {
+                                        throw new Error(event.message);
+                                    }
+                                    
+                                    if (event.chunk) {
+                                        fullResponse += event.chunk;
+                                        chunkCount++;
+                                        document.getElementById('chunkCount').textContent = chunkCount;
+                                        streamingContentEl.textContent = fullResponse + '▌';
+                                        messagesEl.scrollTop = messagesEl.scrollHeight;
+                                    }
+                                    
+                                    if (event.done) {
+                                        cached = event.cached;
+                                        receivedDone = true;
+                                        log(`Response complete. Cached: ${cached}, Length: ${fullResponse.length}`, 'success');
+                                    }
+                                } catch (e) {
+                                    // Log parsing errors for debugging
+                                    if (e.message !== 'Unexpected end of JSON input') {
+                                        console.error('SSE parse error:', e, 'Line:', line);
+                                        throw e;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                // Process any remaining buffer
+                if (buffer.trim()) {
+                    log(`Remaining buffer: ${buffer}`, 'info');
+                }
+                
+                // Finalize - ensure content is set even if no done event received
+                const elapsed = Date.now() - startTime;
+                document.getElementById('responseTime').textContent = `${elapsed}ms`;
+                
+                if (fullResponse) {
+                    streamingContentEl.textContent = fullResponse;
+                    streamingBadgeEl.innerHTML = 
+                        `<span class="badge ${cached ? 'cached' : 'fresh'}">${cached ? '⚡ cached' : '🔄 fresh'}</span>`;
+                } else {
+                    log('Warning: No content received from stream', 'error');
+                    streamingContentEl.textContent = '[No response received]';
+                }
+                
+                // Update message count
+                const count = parseInt(document.getElementById('messageCount').textContent) + 2;
+                document.getElementById('messageCount').textContent = count;
+                
+            } catch (error) {
+                if (error.name === 'AbortError') {
+                    log('Stream cancelled', 'info');
+                    streamingContentEl.textContent = fullResponse ? fullResponse + ' [cancelled]' : '[cancelled]';
+                } else {
+                    log(`Error: ${error.message}`, 'error');
+                    setStatus(`✕ Error: ${error.message}`, 'error');
+                    streamingContentEl.textContent = `Error: ${error.message}`;
+                }
+            } finally {
+                isStreaming = false;
+                setStatus('● Ready', 'ready');
+                document.getElementById('sendBtn').disabled = false;
+                document.getElementById('cancelBtn').style.display = 'none';
+                promptEl.disabled = false;
+                promptEl.focus();
+                abortController = null;
+            }
+        }
+        
+        // Cancel stream
+        function cancelStream() {
+            if (abortController) {
+                abortController.abort();
+            }
+        }
+        
+        // Initialize
+        window.onload = () => {
+            log('SSE Chat Test initialized');
+            loadConversations();
+        };
+    </script>
+</body>
+</html>
