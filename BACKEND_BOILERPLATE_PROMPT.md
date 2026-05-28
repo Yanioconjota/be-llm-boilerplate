@@ -51,6 +51,7 @@ ollama serve
 ```
 project-root/
 ├── docker-compose.yml
+├── test-websocket.html       # WebSocket test page (open in browser)
 ├── fast-api/
 │   ├── app/
 │   │   └── main.py
@@ -145,6 +146,269 @@ volumes:
   redis-data:
 ```
 
+### 2. `test-websocket.html` (root)
+
+WebSocket test page - open in browser to test streaming responses.
+
+```html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebSocket Test - Ollama LLM</title>
+    <style>
+        * { box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #1a1a2e;
+            color: #eee;
+        }
+        h1 { color: #00d9ff; }
+        .status {
+            padding: 8px 16px;
+            border-radius: 20px;
+            display: inline-block;
+            margin-bottom: 20px;
+            font-weight: bold;
+        }
+        .connected { background: #0f5132; color: #75b798; }
+        .disconnected { background: #842029; color: #f5c2c7; }
+        .connecting { background: #664d03; color: #ffda6a; }
+        textarea {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #333;
+            border-radius: 8px;
+            background: #16213e;
+            color: #eee;
+            font-size: 16px;
+            resize: vertical;
+            min-height: 100px;
+        }
+        textarea:focus { outline: none; border-color: #00d9ff; }
+        button {
+            padding: 12px 24px;
+            font-size: 16px;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            margin: 10px 5px 10px 0;
+            transition: all 0.2s;
+        }
+        button:disabled { opacity: 0.5; cursor: not-allowed; }
+        .btn-primary { background: #00d9ff; color: #000; }
+        .btn-primary:hover:not(:disabled) { background: #00b8d9; }
+        .btn-secondary { background: #333; color: #fff; }
+        .btn-secondary:hover:not(:disabled) { background: #444; }
+        .btn-danger { background: #dc3545; color: #fff; }
+        .btn-danger:hover:not(:disabled) { background: #bb2d3b; }
+        .response-container {
+            background: #16213e;
+            border-radius: 8px;
+            padding: 20px;
+            margin-top: 20px;
+            min-height: 200px;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            border: 2px solid #333;
+        }
+        .response-container.streaming { border-color: #00d9ff; }
+        .meta {
+            display: flex;
+            gap: 20px;
+            margin-top: 10px;
+            font-size: 14px;
+            color: #888;
+        }
+        .meta span { background: #333; padding: 4px 8px; border-radius: 4px; }
+        .cached { color: #ffc107 !important; }
+        .fresh { color: #28a745 !important; }
+        .error { color: #dc3545; background: #2c1215; padding: 10px; border-radius: 4px; }
+        .logs {
+            background: #0d1117;
+            padding: 10px;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 12px;
+            max-height: 150px;
+            overflow-y: auto;
+            margin-top: 20px;
+        }
+        .logs div { margin: 2px 0; }
+        .log-send { color: #58a6ff; }
+        .log-receive { color: #7ee787; }
+        .log-error { color: #f85149; }
+        .log-info { color: #8b949e; }
+    </style>
+</head>
+<body>
+    <h1>🔌 WebSocket Test</h1>
+    
+    <div id="status" class="status disconnected">● Disconnected</div>
+    
+    <div>
+        <button id="connectBtn" class="btn-primary" onclick="connect()">Connect</button>
+        <button id="disconnectBtn" class="btn-danger" onclick="disconnect()" disabled>Disconnect</button>
+    </div>
+
+    <h3>Send Prompt</h3>
+    <textarea id="prompt" placeholder="Enter your prompt here...">Tell me a short joke about programming</textarea>
+    
+    <div>
+        <button id="sendBtn" class="btn-primary" onclick="sendPrompt()" disabled>Send</button>
+        <button class="btn-secondary" onclick="clearResponse()">Clear</button>
+    </div>
+
+    <h3>Response <span id="streamingIndicator" style="display:none; color: #00d9ff;">● Streaming...</span></h3>
+    <div id="response" class="response-container">Response will appear here...</div>
+    
+    <div class="meta">
+        <span>Chunks: <strong id="chunkCount">0</strong></span>
+        <span>Cached: <strong id="cachedStatus">-</strong></span>
+        <span>Time: <strong id="responseTime">-</strong></span>
+    </div>
+
+    <h3>Connection Log</h3>
+    <div id="logs" class="logs"></div>
+
+    <script>
+        let ws = null;
+        let chunkCount = 0;
+        let startTime = null;
+        
+        const statusEl = document.getElementById('status');
+        const connectBtn = document.getElementById('connectBtn');
+        const disconnectBtn = document.getElementById('disconnectBtn');
+        const sendBtn = document.getElementById('sendBtn');
+        const promptEl = document.getElementById('prompt');
+        const responseEl = document.getElementById('response');
+        const chunkCountEl = document.getElementById('chunkCount');
+        const cachedStatusEl = document.getElementById('cachedStatus');
+        const responseTimeEl = document.getElementById('responseTime');
+        const streamingIndicator = document.getElementById('streamingIndicator');
+        const logsEl = document.getElementById('logs');
+
+        function log(message, type = 'info') {
+            const div = document.createElement('div');
+            div.className = `log-${type}`;
+            div.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+            logsEl.appendChild(div);
+            logsEl.scrollTop = logsEl.scrollHeight;
+        }
+
+        function updateStatus(status) {
+            statusEl.className = `status ${status}`;
+            statusEl.textContent = status === 'connected' ? '● Connected' : 
+                                   status === 'connecting' ? '◐ Connecting...' : '● Disconnected';
+        }
+
+        function connect() {
+            if (ws) return;
+            
+            updateStatus('connecting');
+            log('Connecting to ws://localhost:8000/ws/ask...', 'info');
+            
+            ws = new WebSocket('ws://localhost:8000/ws/ask');
+            
+            ws.onopen = () => {
+                updateStatus('connected');
+                connectBtn.disabled = true;
+                disconnectBtn.disabled = false;
+                sendBtn.disabled = false;
+                log('Connected successfully!', 'info');
+            };
+            
+            ws.onclose = () => {
+                updateStatus('disconnected');
+                connectBtn.disabled = false;
+                disconnectBtn.disabled = true;
+                sendBtn.disabled = true;
+                streamingIndicator.style.display = 'none';
+                ws = null;
+                log('Connection closed', 'info');
+            };
+            
+            ws.onerror = (error) => {
+                log('WebSocket error - Is the server running?', 'error');
+            };
+            
+            ws.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                log(`Received: ${JSON.stringify(data).substring(0, 100)}...`, 'receive');
+                
+                if (data.error) {
+                    responseEl.innerHTML = `<div class="error">Error: ${data.message}</div>`;
+                    streamingIndicator.style.display = 'none';
+                    responseEl.classList.remove('streaming');
+                    return;
+                }
+                
+                if (data.chunk) {
+                    responseEl.textContent += data.chunk;
+                    chunkCount++;
+                    chunkCountEl.textContent = chunkCount;
+                }
+                
+                if (data.done) {
+                    streamingIndicator.style.display = 'none';
+                    responseEl.classList.remove('streaming');
+                    sendBtn.disabled = false;
+                    
+                    cachedStatusEl.textContent = data.cached ? 'Yes ⚡' : 'No';
+                    cachedStatusEl.className = data.cached ? 'cached' : 'fresh';
+                    
+                    const elapsed = Date.now() - startTime;
+                    responseTimeEl.textContent = `${elapsed}ms`;
+                    
+                    log(`Complete! ${chunkCount} chunks, ${elapsed}ms, cached: ${data.cached}`, 'info');
+                }
+            };
+        }
+
+        function disconnect() {
+            if (ws) {
+                ws.close();
+            }
+        }
+
+        function sendPrompt() {
+            const prompt = promptEl.value.trim();
+            if (!prompt || !ws) return;
+            
+            responseEl.textContent = '';
+            responseEl.classList.add('streaming');
+            chunkCount = 0;
+            chunkCountEl.textContent = '0';
+            cachedStatusEl.textContent = '-';
+            responseTimeEl.textContent = '-';
+            streamingIndicator.style.display = 'inline';
+            sendBtn.disabled = true;
+            startTime = Date.now();
+            
+            const message = JSON.stringify({ prompt });
+            ws.send(message);
+            log(`Sent: ${message}`, 'send');
+        }
+
+        function clearResponse() {
+            responseEl.textContent = 'Response will appear here...';
+            chunkCount = 0;
+            chunkCountEl.textContent = '0';
+            cachedStatusEl.textContent = '-';
+            responseTimeEl.textContent = '-';
+        }
+
+        // Auto-connect on page load
+        connect();
+    </script>
+</body>
+</html>
+```
+
 ---
 
 ## FastAPI Service (`fast-api/`)
@@ -200,7 +464,8 @@ import os
 import json
 import logging
 import requests
-from fastapi import FastAPI, HTTPException
+import asyncio
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from fastapi.middleware.cors import CORSMiddleware
@@ -288,6 +553,148 @@ async def ask_ollama_dynamic(request: PromptRequest):
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
+
+
+class ConnectionManager:
+    """Manages WebSocket connections"""
+    def __init__(self):
+        self.active_connections: list[WebSocket] = []
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+        logging.info(f"WebSocket connected. Active connections: {len(self.active_connections)}")
+
+    def disconnect(self, websocket: WebSocket):
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
+        logging.info(f"WebSocket disconnected. Active connections: {len(self.active_connections)}")
+
+
+manager = ConnectionManager()
+
+
+async def stream_from_ollama(prompt: str, model: str = "llama3"):
+    """Generator that streams responses from Ollama"""
+    payload = {
+        "model": model,
+        "prompt": prompt,
+        "stream": True
+    }
+    
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        async with client.stream("POST", ollama_url, json=payload) as response:
+            response.raise_for_status()
+            async for line in response.aiter_lines():
+                if line:
+                    try:
+                        chunk_data = json.loads(line)
+                        token = chunk_data.get("response", "")
+                        done = chunk_data.get("done", False)
+                        if token:
+                            yield token
+                        if done:
+                            break
+                    except json.JSONDecodeError:
+                        continue
+
+
+@app.websocket("/ws/ask")
+async def websocket_ask(websocket: WebSocket):
+    """
+    WebSocket endpoint for streaming LLM responses.
+    
+    Send: {"prompt": "your question here"}
+    Receive: {"chunk": "token", "done": false, "cached": false}
+             {"chunk": "", "done": true, "cached": false}
+    
+    Error: {"error": "error_type", "message": "description"}
+    """
+    await manager.connect(websocket)
+    model = "llama3"
+    
+    try:
+        while True:
+            data = await websocket.receive_json()
+            prompt = data.get("prompt", "").strip()
+            
+            if not prompt:
+                await websocket.send_json({
+                    "error": "validation",
+                    "message": "Prompt cannot be empty"
+                })
+                continue
+            
+            logging.info(f"WebSocket received prompt: {prompt[:50]}...")
+            
+            cached_response = get_cached_response(prompt, model)
+            if cached_response:
+                logging.info("WebSocket: Cache HIT - streaming cached response")
+                words = cached_response.split(" ")
+                for i, word in enumerate(words):
+                    chunk = word + (" " if i < len(words) - 1 else "")
+                    await websocket.send_json({
+                        "chunk": chunk,
+                        "done": False,
+                        "cached": True
+                    })
+                    await asyncio.sleep(0.02)
+                
+                await websocket.send_json({
+                    "chunk": "",
+                    "done": True,
+                    "cached": True
+                })
+                continue
+            
+            logging.info("WebSocket: Cache MISS - streaming from Ollama")
+            full_response = ""
+            
+            try:
+                async for token in stream_from_ollama(prompt, model):
+                    full_response += token
+                    await websocket.send_json({
+                        "chunk": token,
+                        "done": False,
+                        "cached": False
+                    })
+                
+                set_cached_response(prompt, full_response, model)
+                await forward_to_storage(prompt=prompt, response=full_response)
+                
+                await websocket.send_json({
+                    "chunk": "",
+                    "done": True,
+                    "cached": False
+                })
+                logging.info(f"WebSocket: Response completed ({len(full_response)} chars)")
+                
+            except httpx.ConnectError:
+                logging.error("WebSocket: Ollama connection failed")
+                await websocket.send_json({
+                    "error": "llm_unavailable",
+                    "message": "Cannot connect to Ollama. Ensure it is running with 'ollama serve'"
+                })
+            except httpx.TimeoutException:
+                logging.error("WebSocket: Ollama request timed out")
+                await websocket.send_json({
+                    "error": "timeout",
+                    "message": "Request timed out. Please try again."
+                })
+            except Exception as e:
+                logging.error(f"WebSocket: Error streaming from Ollama: {e}")
+                await websocket.send_json({
+                    "error": "internal",
+                    "message": f"An error occurred: {str(e)}"
+                })
+                
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
+        logging.info("WebSocket: Client disconnected")
+    except Exception as e:
+        manager.disconnect(websocket)
+        logging.error(f"WebSocket: Unexpected error: {e}")
+        traceback.print_exc()
 ```
 
 ### `fast-api/utils/__init__.py`
@@ -543,6 +950,11 @@ curl -X POST http://localhost:8000/ask \
 curl -X POST http://localhost:8000/ask \
   -H "Content-Type: application/json" \
   -d '{"prompt": "Why is the sky blue?"}'
+
+# Test WebSocket (open in browser)
+start test-websocket.html   # Windows
+open test-websocket.html    # macOS
+xdg-open test-websocket.html # Linux
 ```
 
 ---
@@ -562,11 +974,25 @@ curl -X POST http://localhost:8000/ask \
 
 ### FastAPI (Port 8000)
 
+#### REST Endpoints
+
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/` | Health check |
 | GET | `/joker` | Demo: get a joke from Ollama |
-| POST | `/ask` | Send prompt, get LLM response |
+| POST | `/ask` | Send prompt, get LLM response (full response) |
+
+#### WebSocket Endpoint
+
+| Protocol | Path | Description |
+|----------|------|-------------|
+| WS | `/ws/ask` | Stream LLM responses token-by-token |
+
+**WebSocket Message Format:**
+- **Send**: `{"prompt": "your question here"}`
+- **Receive (chunk)**: `{"chunk": "token", "done": false, "cached": false}`
+- **Receive (complete)**: `{"chunk": "", "done": true, "cached": false}`
+- **Receive (error)**: `{"error": "error_type", "message": "description"}`
 
 ### Storage Service (Port 8001)
 
