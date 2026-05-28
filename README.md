@@ -47,8 +47,15 @@ A complete FastAPI microservices backend with Redis caching, MongoDB persistence
 ```
 project-root/
 ├── docker-compose.yml
+├── showcase.md                         # Knowledge system documentation
 ├── specs/
-│   └── sse-conversations.spec.md   # Feature specification
+│   └── sse-conversations.spec.md       # Feature specification
+├── docs/
+│   └── frontend-integration-prompt.md  # Frontend integration guide
+├── .cursor/                            # AI-assisted development rules
+│   ├── rules/                          # Coding standards & patterns
+│   ├── commands/                       # Scaffolding automation
+│   └── skills/                         # Debugging workflows
 ├── fast-api/
 │   ├── app/
 │   │   └── main.py
@@ -74,6 +81,32 @@ project-root/
     ├── Dockerfile
     └── requirements.txt
 ```
+
+## Project Knowledge System
+
+This project includes a **codified knowledge system** for AI-assisted development. See [`showcase.md`](showcase.md) for full documentation.
+
+```
+.cursor/
+├── rules/                              # HOW we do things here
+│   ├── 001-project-architecture.md     # Microservices, folder structure
+│   ├── 002-fastapi-patterns.md         # Endpoints, Pydantic, async
+│   ├── 003-sse-streaming.md            # SSE patterns, event format
+│   ├── 004-caching-patterns.md         # Redis keys, TTL, error handling
+│   ├── 005-mongodb-patterns.md         # Document design, indexes
+│   ├── 006-frontend-integration.md     # TypeScript interfaces, state
+│   └── 007-testing-patterns.md         # Test behavior, not implementation
+├── commands/
+│   └── new-endpoint.md                 # Scaffold new API endpoints
+└── skills/
+    └── debug-sse.md                    # Diagnose SSE streaming issues
+```
+
+**Key one-liners from the rules**:
+- "SSE is HTTP that learned to talk continuously"
+- "A broken cache is an inconvenience; a broken app is a disaster"
+- "Test WHAT the code does, not HOW it does it"
+- "Pydantic models are your first line of defense"
 
 ## Quick Start
 
