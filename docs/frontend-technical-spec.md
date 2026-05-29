@@ -1,23 +1,15 @@
-# Frontend Integration Prompt: Ollama Chat Backend
+# Frontend Integration: Ollama Chat - Technical Specification
 
-> This document was generated to facilitate Angular 19+ frontend development.
-> Copy this entire document into a new conversation to build the frontend.
+## Environment Setup
 
----
-
-## Project Context
-
-A FastAPI microservices backend for an LLM chat application featuring:
-
-- **Ollama** integration for local LLM inference (llama3 model)
-- **Redis** caching for response deduplication (1 hour TTL)
-- **MongoDB** persistence for conversations and messages
-- **Server-Sent Events (SSE)** for real-time streaming responses
-- Full conversation management with context window support (last 10 messages)
-
-**Backend URL**: `http://localhost:8000` (development)
-**API Base Path**: `/` (no prefix)
-**Storage Service**: `http://localhost:8001` (internal, not exposed to frontend)
+| Service | URL | Purpose |
+|---------|-----|---------|
+| FastAPI Gateway | http://localhost:8000 | Main API (frontend connects here) |
+| Swagger Docs | http://localhost:8000/docs | API documentation |
+| Storage Service | http://localhost:8001 | Internal (MongoDB persistence) |
+| MongoDB | localhost:27017 | Database |
+| Redis | localhost:6379 | Response cache |
+| RedisInsight | http://localhost:8002 | Redis GUI |
 
 ---
 
@@ -31,15 +23,15 @@ A FastAPI microservices backend for an LLM chat application featuring:
 
 ### Endpoints
 
-| Method | Path | Auth | Request Body | Query Params | Response | Description |
-|--------|------|------|--------------|--------------|----------|-------------|
-| GET | `/` | - | - | - | `HealthResponse` | Health check |
-| POST | `/conversations` | - | `CreateConversationRequest` | - | `Conversation` | Create new conversation |
-| GET | `/conversations` | - | - | `limit`, `offset` | `ConversationList` | List conversations (paginated) |
-| GET | `/conversations/{id}` | - | - | - | `ConversationWithMessages` | Get conversation with all messages |
-| DELETE | `/conversations/{id}` | - | - | - | `DeleteResponse` | Delete conversation and messages |
-| POST | `/conversations/{id}/stream` | - | `StreamRequest` | - | SSE stream | Send message & stream LLM response |
-| POST | `/ask` | - | `PromptRequest` | - | `AskResponse` | Stateless prompt (no conversation context) |
+| Method | Path | Request Body | Query Params | Response | Description |
+|--------|------|--------------|--------------|----------|-------------|
+| GET | `/` | - | - | `HealthResponse` | Health check |
+| POST | `/conversations` | `CreateConversationRequest` | - | `Conversation` | Create new conversation |
+| GET | `/conversations` | - | `limit`, `offset` | `ConversationList` | List conversations (paginated) |
+| GET | `/conversations/{id}` | - | - | `ConversationWithMessages` | Get conversation with all messages |
+| DELETE | `/conversations/{id}` | - | - | `DeleteResponse` | Delete conversation and messages |
+| POST | `/conversations/{id}/stream` | `StreamRequest` | - | SSE stream | Send message & stream LLM response |
+| POST | `/ask` | `PromptRequest` | - | `AskResponse` | Stateless prompt (no conversation context) |
 
 ### Pagination Pattern
 
@@ -166,9 +158,9 @@ export function isSseChunk(event: SseEvent): event is SseChunkEvent {
 
 ---
 
-## Real-Time Features (SSE)
+## SSE Streaming Protocol
 
-**SSE Endpoint**: `POST /conversations/{id}/stream`
+**Endpoint**: `POST /conversations/{id}/stream`
 
 > **Important**: This is NOT a standard EventSource-compatible endpoint because it requires a POST body.
 > Use `fetch` API with streaming instead of `EventSource`.
@@ -198,21 +190,7 @@ data: {"error": "timeout", "message": "Request timed out"}
 
 ---
 
-## Business Rules & Constraints
-
-| Rule | Value |
-|------|-------|
-| Max messages per conversation | 100 |
-| Context window (sent to LLM) | Last 10 messages |
-| Cache TTL | 1 hour (3600s) |
-| Default model | `llama3` |
-| Empty prompts | Not allowed (400 error) |
-
----
-
-## Suggested Frontend Architecture
-
-### Project Structure
+## Suggested Project Structure
 
 ```
 src/app/
@@ -236,25 +214,13 @@ src/app/
 │       │   └── chat.store.ts
 │       ├── components/
 │       │   ├── chat-container/
-│       │   │   ├── chat-container.component.ts
-│       │   │   └── chat-container.component.html
 │       │   ├── conversation-list/
-│       │   │   ├── conversation-list.component.ts
-│       │   │   └── conversation-list.component.html
 │       │   ├── message-list/
-│       │   │   ├── message-list.component.ts
-│       │   │   └── message-list.component.html
 │       │   ├── message-bubble/
-│       │   │   ├── message-bubble.component.ts
-│       │   │   └── message-bubble.component.html
 │       │   ├── chat-input/
-│       │   │   ├── chat-input.component.ts
-│       │   │   └── chat-input.component.html
 │       │   └── typing-indicator/
-│       │       └── typing-indicator.component.ts
 │       └── pages/
 │           └── chat-page/
-│               └── chat-page.component.ts
 └── shared/
     ├── models/
     │   ├── conversation.model.ts
@@ -262,10 +228,202 @@ src/app/
     │   └── sse-event.model.ts
     └── components/
         └── loading-spinner/
-            └── loading-spinner.component.ts
 ```
 
-### NgRx Signal Store Implementation
+---
+
+## Angular Configuration
+
+### App Configuration
+
+```typescript
+// app.config.ts
+import { ApplicationConfig, provideZoneChangeDetection } from '@angular/core';
+import { provideRouter } from '@angular/router';
+import { provideHttpClient, withInterceptors, withFetch } from '@angular/common/http';
+import { provideAnimationsAsync } from '@angular/platform-browser/animations/async';
+import { routes } from './app.routes';
+import { errorInterceptor } from './core/interceptors/error.interceptor';
+
+export const appConfig: ApplicationConfig = {
+  providers: [
+    provideZoneChangeDetection({ eventCoalescing: true }),
+    provideRouter(routes),
+    provideHttpClient(withInterceptors([errorInterceptor]), withFetch()),
+    provideAnimationsAsync(),
+  ],
+};
+```
+
+### Error Interceptor
+
+```typescript
+// core/interceptors/error.interceptor.ts
+import { HttpInterceptorFn, HttpErrorResponse } from '@angular/common/http';
+import { catchError, throwError } from 'rxjs';
+
+export const errorInterceptor: HttpInterceptorFn = (req, next) => {
+  return next(req).pipe(
+    catchError((error: HttpErrorResponse) => {
+      let message = 'An unexpected error occurred';
+
+      if (error.error?.detail) {
+        message = error.error.detail;
+      } else if (error.status === 0) {
+        message = 'Unable to connect to server. Please check if the backend is running.';
+      } else if (error.status === 404) {
+        message = 'Resource not found';
+      } else if (error.status >= 500) {
+        message = 'Server error. Please try again later.';
+      }
+
+      console.error('API Error:', { status: error.status, message });
+      return throwError(() => new Error(message));
+    })
+  );
+};
+```
+
+---
+
+## Service Implementations
+
+### Conversation API Service
+
+```typescript
+// features/chat/services/conversation-api.service.ts
+import { Injectable, inject } from '@angular/core';
+import { HttpClient, HttpParams } from '@angular/common/http';
+import { Observable } from 'rxjs';
+import {
+  Conversation,
+  ConversationWithMessages,
+  ConversationList,
+  CreateConversationRequest,
+  DeleteResponse,
+} from '../../../shared/models';
+
+@Injectable({ providedIn: 'root' })
+export class ConversationApiService {
+  private readonly http = inject(HttpClient);
+  private readonly baseUrl = 'http://localhost:8000';
+
+  create(request: CreateConversationRequest = {}): Observable<Conversation> {
+    return this.http.post<Conversation>(`${this.baseUrl}/conversations`, request);
+  }
+
+  list(limit = 20, offset = 0): Observable<ConversationList> {
+    const params = new HttpParams()
+      .set('limit', limit.toString())
+      .set('offset', offset.toString());
+    return this.http.get<ConversationList>(`${this.baseUrl}/conversations`, { params });
+  }
+
+  get(id: string): Observable<ConversationWithMessages> {
+    return this.http.get<ConversationWithMessages>(`${this.baseUrl}/conversations/${id}`);
+  }
+
+  delete(id: string): Observable<DeleteResponse> {
+    return this.http.delete<DeleteResponse>(`${this.baseUrl}/conversations/${id}`);
+  }
+}
+```
+
+### SSE Stream Service
+
+```typescript
+// features/chat/services/sse-stream.service.ts
+import { Injectable } from '@angular/core';
+import { SseEvent, isSseError } from '../../../shared/models';
+
+interface StreamResult {
+  fullResponse: string;
+  cached: boolean;
+}
+
+@Injectable({ providedIn: 'root' })
+export class SseStreamService {
+  private readonly baseUrl = 'http://localhost:8000';
+  private abortController: AbortController | null = null;
+
+  async streamMessage(
+    conversationId: string,
+    prompt: string,
+    onChunk: (chunk: string) => void
+  ): Promise<StreamResult> {
+    this.abortController = new AbortController();
+    let fullResponse = '';
+    let cached = false;
+
+    try {
+      const response = await fetch(
+        `${this.baseUrl}/conversations/${conversationId}/stream`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ prompt }),
+          signal: this.abortController.signal,
+        }
+      );
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.detail || `HTTP ${response.status}`);
+      }
+
+      const reader = response.body?.getReader();
+      if (!reader) throw new Error('No response body');
+
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            const jsonStr = line.slice(6).trim();
+            if (jsonStr) {
+              const event: SseEvent = JSON.parse(jsonStr);
+
+              if (isSseError(event)) {
+                throw new Error(event.message);
+              }
+
+              if (event.chunk) {
+                fullResponse += event.chunk;
+                onChunk(event.chunk);
+              }
+
+              if (event.done) {
+                cached = event.cached;
+              }
+            }
+          }
+        }
+      }
+
+      return { fullResponse, cached };
+    } finally {
+      this.abortController = null;
+    }
+  }
+
+  cancel(): void {
+    this.abortController?.abort();
+    this.abortController = null;
+  }
+}
+```
+
+---
+
+## NgRx Signal Store Implementation
 
 ```typescript
 // features/chat/store/chat.store.ts
@@ -507,197 +665,6 @@ export const ChatStore = signalStore(
 
 ---
 
-## Services Implementation
-
-### Conversation API Service
-
-```typescript
-// features/chat/services/conversation-api.service.ts
-import { Injectable, inject } from '@angular/core';
-import { HttpClient, HttpParams } from '@angular/common/http';
-import { Observable } from 'rxjs';
-import {
-  Conversation,
-  ConversationWithMessages,
-  ConversationList,
-  CreateConversationRequest,
-  DeleteResponse,
-} from '../../../shared/models';
-
-@Injectable({ providedIn: 'root' })
-export class ConversationApiService {
-  private readonly http = inject(HttpClient);
-  private readonly baseUrl = 'http://localhost:8000';
-
-  create(request: CreateConversationRequest = {}): Observable<Conversation> {
-    return this.http.post<Conversation>(`${this.baseUrl}/conversations`, request);
-  }
-
-  list(limit = 20, offset = 0): Observable<ConversationList> {
-    const params = new HttpParams()
-      .set('limit', limit.toString())
-      .set('offset', offset.toString());
-    return this.http.get<ConversationList>(`${this.baseUrl}/conversations`, { params });
-  }
-
-  get(id: string): Observable<ConversationWithMessages> {
-    return this.http.get<ConversationWithMessages>(`${this.baseUrl}/conversations/${id}`);
-  }
-
-  delete(id: string): Observable<DeleteResponse> {
-    return this.http.delete<DeleteResponse>(`${this.baseUrl}/conversations/${id}`);
-  }
-}
-```
-
-### SSE Stream Service
-
-```typescript
-// features/chat/services/sse-stream.service.ts
-import { Injectable } from '@angular/core';
-import { SseEvent, isSseError } from '../../../shared/models';
-
-interface StreamResult {
-  fullResponse: string;
-  cached: boolean;
-}
-
-@Injectable({ providedIn: 'root' })
-export class SseStreamService {
-  private readonly baseUrl = 'http://localhost:8000';
-  private abortController: AbortController | null = null;
-
-  async streamMessage(
-    conversationId: string,
-    prompt: string,
-    onChunk: (chunk: string) => void
-  ): Promise<StreamResult> {
-    this.abortController = new AbortController();
-    let fullResponse = '';
-    let cached = false;
-
-    try {
-      const response = await fetch(
-        `${this.baseUrl}/conversations/${conversationId}/stream`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ prompt }),
-          signal: this.abortController.signal,
-        }
-      );
-
-      if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.detail || `HTTP ${response.status}`);
-      }
-
-      const reader = response.body?.getReader();
-      if (!reader) throw new Error('No response body');
-
-      const decoder = new TextDecoder();
-      let buffer = '';
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
-
-        for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            const jsonStr = line.slice(6).trim();
-            if (jsonStr) {
-              const event: SseEvent = JSON.parse(jsonStr);
-
-              if (isSseError(event)) {
-                throw new Error(event.message);
-              }
-
-              if (event.chunk) {
-                fullResponse += event.chunk;
-                onChunk(event.chunk);
-              }
-
-              if (event.done) {
-                cached = event.cached;
-              }
-            }
-          }
-        }
-      }
-
-      return { fullResponse, cached };
-    } finally {
-      this.abortController = null;
-    }
-  }
-
-  cancel(): void {
-    this.abortController?.abort();
-    this.abortController = null;
-  }
-}
-```
-
----
-
-## HTTP Setup
-
-### App Configuration
-
-```typescript
-// app.config.ts
-import { ApplicationConfig, provideZoneChangeDetection } from '@angular/core';
-import { provideRouter } from '@angular/router';
-import { provideHttpClient, withInterceptors, withFetch } from '@angular/common/http';
-import { provideAnimationsAsync } from '@angular/platform-browser/animations/async';
-import { routes } from './app.routes';
-import { errorInterceptor } from './core/interceptors/error.interceptor';
-
-export const appConfig: ApplicationConfig = {
-  providers: [
-    provideZoneChangeDetection({ eventCoalescing: true }),
-    provideRouter(routes),
-    provideHttpClient(withInterceptors([errorInterceptor]), withFetch()),
-    provideAnimationsAsync(),
-  ],
-};
-```
-
-### Error Interceptor
-
-```typescript
-// core/interceptors/error.interceptor.ts
-import { HttpInterceptorFn, HttpErrorResponse } from '@angular/common/http';
-import { catchError, throwError } from 'rxjs';
-
-export const errorInterceptor: HttpInterceptorFn = (req, next) => {
-  return next(req).pipe(
-    catchError((error: HttpErrorResponse) => {
-      let message = 'An unexpected error occurred';
-
-      if (error.error?.detail) {
-        message = error.error.detail;
-      } else if (error.status === 0) {
-        message = 'Unable to connect to server. Please check if the backend is running.';
-      } else if (error.status === 404) {
-        message = 'Resource not found';
-      } else if (error.status >= 500) {
-        message = 'Server error. Please try again later.';
-      }
-
-      console.error('API Error:', { status: error.status, message });
-      return throwError(() => new Error(message));
-    })
-  );
-};
-```
-
----
-
 ## Component Examples
 
 ### Chat Input Component
@@ -890,18 +857,13 @@ export class TypingIndicatorComponent {}
 
 ---
 
-## Instructions for Frontend Development
-
-Build an Angular 19+ frontend following these requirements:
-
-### Required Patterns
+## Required Angular Patterns
 
 1. **Standalone components** - All components must be standalone (`standalone: true`)
 2. **Signal inputs/outputs** - Use `input()`, `input.required()`, `output()`, `model()` instead of decorators
 3. **Control flow** - Use `@if`, `@for`, `@switch` instead of `*ngIf`, `*ngFor`
 4. **inject()** - Use `inject()` function for dependency injection
 5. **Signal Store** - Use NgRx Signal Store (`@ngrx/signals`) for state management
-6. **OnPush** - Default change detection (Angular 19 uses OnPush-like behavior by default)
 
 ### UI Framework Priority
 
@@ -918,70 +880,15 @@ Build an Angular 19+ frontend following these requirements:
 
 ---
 
-## Development Checklist
+## Dependencies
 
-- [ ] Set up Angular 19+ project with standalone components
-- [ ] Install dependencies: `@ngrx/signals`, `ng-zorro-antd`, `bootstrap`
-- [ ] Configure HTTP client with error interceptor
-- [ ] Create TypeScript interfaces from spec above
-- [ ] Implement ConversationApiService for CRUD operations
-- [ ] Implement SseStreamService for SSE streaming
-- [ ] Create NgRx Signal Store for chat state
-- [ ] Build conversation list sidebar component
-- [ ] Build message list with message bubbles
-- [ ] Build chat input with send/cancel buttons
-- [ ] Add typing indicator during streaming
-- [ ] Add streaming text display (real-time chunks)
-- [ ] Add loading states and error handling
-- [ ] Add "cached" badge for cached responses
-- [ ] Implement conversation creation modal
-- [ ] Implement conversation deletion with confirmation
-- [ ] Add responsive layout for mobile
-- [ ] Add ARIA live regions for accessibility
-- [ ] Add empty state when no conversations exist
-
----
-
-## Testing the Backend
-
-Before building the frontend, verify the backend is running:
-
-```bash
-# 1. Start Ollama (required for LLM)
-ollama serve
-
-# 2. Start backend services
-docker-compose up --build
-
-# 3. Test health endpoint
-curl http://localhost:8000/
-
-# 4. Create a conversation
-curl -X POST http://localhost:8000/conversations \
-  -H "Content-Type: application/json" \
-  -d '{"title": "Test Chat"}'
-
-# 5. List conversations
-curl http://localhost:8000/conversations
-
-# 6. Stream a message (replace {id} with actual conversation ID)
-curl -N -X POST "http://localhost:8000/conversations/{id}/stream" \
-  -H "Content-Type: application/json" \
-  -d '{"prompt": "Hello, how are you?"}'
+```json
+{
+  "dependencies": {
+    "@angular/core": "^19.0.0",
+    "@ngrx/signals": "^19.0.0",
+    "ng-zorro-antd": "^19.0.0",
+    "bootstrap": "^5.3.0"
+  }
+}
 ```
-
-**Swagger UI**: http://localhost:8000/docs
-**ReDoc**: http://localhost:8000/redoc
-
----
-
-## Environment Setup Summary
-
-| Service | URL | Purpose |
-|---------|-----|---------|
-| FastAPI Gateway | http://localhost:8000 | Main API (frontend connects here) |
-| Swagger Docs | http://localhost:8000/docs | API documentation |
-| Storage Service | http://localhost:8001 | Internal (MongoDB persistence) |
-| MongoDB | localhost:27017 | Database |
-| Redis | localhost:6379 | Response cache |
-| RedisInsight | http://localhost:8002 | Redis GUI |
